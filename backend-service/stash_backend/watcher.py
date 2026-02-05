@@ -68,6 +68,10 @@ class WatcherService:
         if context is None:
             raise ValueError("Unknown project")
 
+        existing = self._running_job(project_id=project_id, mode="manual_full_reindex")
+        if existing is not None:
+            return existing
+
         job = IndexJob(
             job_id=make_id("idx"),
             project_id=project_id,
@@ -80,6 +84,34 @@ class WatcherService:
         task = asyncio.create_task(self._run_full_reindex(job.job_id))
         self._index_tasks[job.job_id] = task
         return job
+
+    def start_incremental_reindex(self, project_id: str) -> IndexJob:
+        context = self.project_store.get(project_id)
+        if context is None:
+            raise ValueError("Unknown project")
+
+        existing = self._running_job(project_id=project_id, mode="incremental_scan")
+        if existing is not None:
+            return existing
+
+        job = IndexJob(
+            job_id=make_id("idx"),
+            project_id=project_id,
+            status="running",
+            started_at=utc_now_iso(),
+            detail={"mode": "incremental_scan"},
+        )
+        self._index_jobs[job.job_id] = job
+
+        task = asyncio.create_task(self._run_incremental_reindex(job.job_id))
+        self._index_tasks[job.job_id] = task
+        return job
+
+    def _running_job(self, *, project_id: str, mode: str) -> IndexJob | None:
+        for job in self._index_jobs.values():
+            if job.project_id == project_id and job.status == "running" and job.detail.get("mode") == mode:
+                return job
+        return None
 
     def get_job(self, job_id: str) -> IndexJob | None:
         return self._index_jobs.get(job_id)
@@ -103,6 +135,40 @@ class WatcherService:
 
         try:
             result = await asyncio.to_thread(self.indexer.full_reindex, context, repo)
+            job.status = "done"
+            job.detail = result
+            job.finished_at = utc_now_iso()
+
+            with context.lock:
+                repo.add_event("indexing_completed", payload={"job_id": job_id, "result": result})
+        except Exception as exc:
+            job.status = "failed"
+            job.finished_at = utc_now_iso()
+            job.detail["error"] = str(exc)
+            with context.lock:
+                repo.add_event("indexing_failed", payload={"job_id": job_id, "error": str(exc)})
+        finally:
+            self._index_tasks.pop(job_id, None)
+
+    async def _run_incremental_reindex(self, job_id: str) -> None:
+        job = self._index_jobs.get(job_id)
+        if not job:
+            return
+
+        context = self.project_store.get(job.project_id)
+        if context is None:
+            job.status = "failed"
+            job.finished_at = utc_now_iso()
+            job.detail["error"] = "project not loaded"
+            return
+
+        repo = ProjectRepository(context)
+
+        with context.lock:
+            repo.add_event("indexing_started", payload={"job_id": job_id, "mode": "incremental"})
+
+        try:
+            result = await asyncio.to_thread(self.indexer.scan_project_files, context, repo)
             job.status = "done"
             job.detail = result
             job.finished_at = utc_now_iso()

@@ -311,7 +311,11 @@ def create_app(services: Services) -> FastAPI:
     @app.post("/v1/projects/{project_id}/index", response_model=IndexJobResponse)
     async def trigger_index(project_id: str, request: IndexRequest) -> IndexJobResponse:
         _context, _repo = _repo_or_404(services, project_id)
-        job = services.watcher.start_full_reindex(project_id)
+        job = (
+            services.watcher.start_full_reindex(project_id)
+            if request.full_scan
+            else services.watcher.start_incremental_reindex(project_id)
+        )
         return IndexJobResponse(
             job_id=job.job_id,
             project_id=job.project_id,

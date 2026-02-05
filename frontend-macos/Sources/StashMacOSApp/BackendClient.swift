@@ -100,7 +100,7 @@ struct BackendClient {
         try await request(path: "/v1/projects/\(projectID)/runs/\(runID)", method: "GET", body: Optional<Int>.none)
     }
 
-    func triggerIndex(projectID: String) async throws {
+    func triggerIndex(projectID: String, fullScan: Bool = true) async throws {
         struct Payload: Encodable {
             let fullScan: Bool
         }
@@ -108,7 +108,7 @@ struct BackendClient {
         _ = try await request(
             path: "/v1/projects/\(projectID)/index",
             method: "POST",
-            body: Payload(fullScan: true)
+            body: Payload(fullScan: fullScan)
         ) as Empty
     }
 

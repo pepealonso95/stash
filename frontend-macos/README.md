@@ -11,6 +11,9 @@ Codex-style light-mode desktop UI for Stash.
 - Automatic indexing:
   - Project indexing is triggered automatically every time a project is opened
 - File browser for current project root
+- Automatic file polling for the active project:
+  - New/removed files in the folder tree are reflected in the UI automatically
+  - File changes trigger incremental re-index requests (`full_scan: false`)
 - Conversation switcher and message timeline
 - Composer to send work requests to backend
 - Run polling and status display

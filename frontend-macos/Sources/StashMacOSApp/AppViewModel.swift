@@ -24,8 +24,14 @@ final class AppViewModel: ObservableObject {
     @Published var errorText: String?
 
     private var runPollTask: Task<Void, Never>?
+    private var filePollTask: Task<Void, Never>?
+    private var indexStatusClearTask: Task<Void, Never>?
+    private var lastFileSignature: Int?
+    private var lastFileChangeIndexRequestAt = Date.distantPast
     private var didBootstrap = false
     private var isPresentingProjectPicker = false
+    private let filePollInterval: Duration = .seconds(2)
+    private let changeIndexCooldownSeconds: TimeInterval = 4
     private let defaults = UserDefaults.standard
     private let lastProjectPathKey = "stash.lastProjectPath"
     private var client: BackendClient
@@ -37,6 +43,8 @@ final class AppViewModel: ObservableObject {
 
     deinit {
         runPollTask?.cancel()
+        filePollTask?.cancel()
+        indexStatusClearTask?.cancel()
     }
 
     var selectedConversation: Conversation? {
@@ -104,7 +112,8 @@ final class AppViewModel: ObservableObject {
             projectRootURL = url
             defaults.set(url.path, forKey: lastProjectPathKey)
 
-            refreshFiles()
+            await refreshFiles(force: true, triggerChangeIndex: false)
+            startFilePolling()
             await refreshConversations()
             await autoIndexCurrentProject()
             await pingBackend()
@@ -178,26 +187,74 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func refreshFiles() {
-        guard let projectRootURL else {
-            files = []
-            return
-        }
-        files = FileScanner.scan(rootURL: projectRootURL)
+    func refreshFiles() async {
+        await refreshFiles(force: false, triggerChangeIndex: false)
     }
 
-    func autoIndexCurrentProject() async {
+    private func refreshFiles(force: Bool, triggerChangeIndex: Bool) async {
+        guard let projectRootURL else {
+            files = []
+            lastFileSignature = nil
+            return
+        }
+
+        let scanned = await Task.detached(priority: .utility) {
+            FileScanner.scan(rootURL: projectRootURL)
+        }.value
+
+        let signature = FileScanner.signature(for: scanned)
+        let changed = force || signature != lastFileSignature
+        let hadPreviousSnapshot = lastFileSignature != nil
+        guard changed else { return }
+
+        files = scanned
+        lastFileSignature = signature
+
+        guard triggerChangeIndex, hadPreviousSnapshot else { return }
+        await autoIndexCurrentProject(fullScan: false, statusText: "New files detected. Re-indexing...")
+    }
+
+    func autoIndexCurrentProject(fullScan: Bool = true, statusText: String = "Auto-indexing project...") async {
         guard let projectID = project?.id else {
             return
         }
 
-        indexingStatusText = "Auto-indexing project..."
+        if !fullScan {
+            let now = Date()
+            if now.timeIntervalSince(lastFileChangeIndexRequestAt) < changeIndexCooldownSeconds {
+                return
+            }
+            lastFileChangeIndexRequestAt = now
+        }
+
+        indexingStatusText = statusText
         do {
-            try await client.triggerIndex(projectID: projectID)
-            indexingStatusText = "Indexing started"
+            try await client.triggerIndex(projectID: projectID, fullScan: fullScan)
+            indexingStatusText = fullScan ? "Indexing started" : "Change index started"
+            scheduleIndexStatusClear()
         } catch {
             indexingStatusText = nil
             errorText = "Could not auto-index project: \(error.localizedDescription)"
+        }
+    }
+
+    private func startFilePolling() {
+        filePollTask?.cancel()
+        filePollTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                await self.refreshFiles(force: false, triggerChangeIndex: true)
+                try? await Task.sleep(for: self.filePollInterval)
+            }
+        }
+    }
+
+    private func scheduleIndexStatusClear() {
+        indexStatusClearTask?.cancel()
+        indexStatusClearTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let self else { return }
+            self.indexingStatusText = nil
         }
     }
 

@@ -49,4 +49,13 @@ struct FileScanner {
 
         return files
     }
+
+    static func signature(for files: [FileItem]) -> Int {
+        var hasher = Hasher()
+        for item in files {
+            hasher.combine(item.relativePath)
+            hasher.combine(item.isDirectory)
+        }
+        return hasher.finalize()
+    }
 }
