@@ -54,6 +54,12 @@ uvicorn stash_backend.main:app --host 127.0.0.1 --port 8765 --reload
 ./scripts/run_backend.sh
 ```
 
+Optional frontend config generation during install:
+
+```bash
+STASH_FRONTEND_CONFIG_PATH="/absolute/path/to/Backend.xcconfig" ./scripts/install_stack.sh
+```
+
 ## Smoke test
 
 ```bash

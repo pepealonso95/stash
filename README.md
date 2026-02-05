@@ -71,8 +71,8 @@ This does a single local setup for the stack:
 
 - Creates `.venv/`
 - Installs backend dependencies
-- Writes frontend backend URL config at `frontend-macos/Config/Backend.xcconfig`
 - Writes `.env.local` with `STASH_BACKEND_URL=http://127.0.0.1:8765`
+- Optionally writes frontend config when `STASH_FRONTEND_CONFIG_PATH` is set
 
 Run commands:
 
@@ -90,6 +90,9 @@ make run-backend
 make run-stack
 make smoke-test
 ```
+
+Frontend run/integration notes:
+- `docs/FRONTEND_BACKEND_RUN.md`
 
 ## License
 TBD

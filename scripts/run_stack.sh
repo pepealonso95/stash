@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FRONTEND_DIR="$ROOT_DIR/frontend-macos"
+FRONTEND_PROJECT_PATH="${STASH_FRONTEND_PROJECT_PATH:-}"
 
 cleanup() {
   if [[ -n "${BACKEND_PID:-}" ]]; then
@@ -19,13 +19,23 @@ sleep 1
 
 echo "Backend running on http://127.0.0.1:8765 (pid=$BACKEND_PID)"
 
-if compgen -G "$FRONTEND_DIR/*.xcodeproj" >/dev/null; then
-  XCODEPROJ=$(ls "$FRONTEND_DIR"/*.xcodeproj | head -n 1)
-  echo "Opening frontend project: $XCODEPROJ"
-  open "$XCODEPROJ"
+if [ -n "$FRONTEND_PROJECT_PATH" ] && [ -d "$FRONTEND_PROJECT_PATH" ]; then
+  echo "Opening frontend project: $FRONTEND_PROJECT_PATH"
+  open "$FRONTEND_PROJECT_PATH"
 else
-  echo "No frontend Xcode project found in $FRONTEND_DIR"
-  echo "Backend stays running. Press Ctrl+C to stop."
+  XCODEPROJ="$(find "$ROOT_DIR" -maxdepth 4 -type d -name '*.xcodeproj' \
+    ! -path "$ROOT_DIR/.git/*" \
+    ! -path "$ROOT_DIR/.venv/*" \
+    ! -path "$ROOT_DIR/backend-service/*" | head -n 1)"
+
+  if [ -n "$XCODEPROJ" ]; then
+    echo "Opening frontend project: $XCODEPROJ"
+    open "$XCODEPROJ"
+  else
+    echo "No frontend Xcode project found."
+    echo "Set STASH_FRONTEND_PROJECT_PATH to an .xcodeproj if needed."
+    echo "Backend stays running. Press Ctrl+C to stop."
+  fi
 fi
 
 wait "$BACKEND_PID"
