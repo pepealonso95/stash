@@ -506,9 +506,15 @@ class Planner:
             if result is not None:
                 return result
 
-        fallback = (
-            "Planner fallback: could not generate an execution plan. "
-            "Open AI setup in Stash and verify Codex CLI login, then configure OpenAI API key as fallback."
-        )
+        if runtime.planner_backend == "openai_api" and not self._openai_available(runtime=runtime):
+            fallback_hint = "Open AI setup and add your OpenAI API key."
+        elif not self._codex_available(runtime=runtime) and not self._openai_available(runtime=runtime):
+            fallback_hint = "Verify Codex CLI login, or add an OpenAI API key in AI setup."
+        elif not self._codex_available(runtime=runtime):
+            fallback_hint = "Verify Codex CLI installation and login in AI setup."
+        else:
+            fallback_hint = "Try again or rephrase the request."
+
+        fallback = f"Planner fallback: could not generate an execution plan. {fallback_hint}"
         logger.error("Planner fallback reached: no commands generated")
         return PlanResult(planner_text=fallback, commands=[])

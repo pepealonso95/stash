@@ -32,11 +32,11 @@ final class AppViewModel: ObservableObject {
     @Published var setupPlannerBackend = "auto"
     @Published var setupCodexMode = "cli"
     @Published var setupCodexBin = "codex"
-    @Published var setupCodexPlannerModel = "gpt-5-mini"
+    @Published var setupCodexPlannerModel = "gpt-5"
     @Published var setupPlannerCmd = ""
     @Published var setupPlannerTimeoutSeconds = "150"
     @Published var setupOpenAIAPIKey = ""
-    @Published var setupOpenAIModel = "gpt-5-mini"
+    @Published var setupOpenAIModel = "gpt-5"
     @Published var setupOpenAIBaseURL = "https://api.openai.com/v1"
     @Published var setupOpenAITimeoutSeconds = "60"
     @Published var setupStatusText: String?
@@ -190,7 +190,7 @@ final class AppViewModel: ObservableObject {
             setupStatus = status
             setupPlannerBackend = config.plannerBackend
             setupCodexMode = config.codexMode
-            setupCodexBin = config.codexBin
+            setupCodexBin = status.codexBinResolved ?? config.codexBin
             setupCodexPlannerModel = config.codexPlannerModel
             setupPlannerCmd = config.plannerCmd ?? ""
             setupPlannerTimeoutSeconds = String(config.plannerTimeoutSeconds)
@@ -198,11 +198,21 @@ final class AppViewModel: ObservableObject {
             setupOpenAIBaseURL = config.openaiBaseUrl
             setupOpenAITimeoutSeconds = String(config.openaiTimeoutSeconds)
             if onboardingActive {
-                setupStatusText = status.plannerReady
-                    ? "AI setup is ready. Select a project folder, then finish onboarding."
-                    : "Complete setup to continue onboarding."
+                if status.plannerReady {
+                    setupStatusText = "AI setup is ready. Select a project folder, then finish onboarding."
+                } else if status.needsOpenaiKey == true {
+                    setupStatusText = "Add an OpenAI API key, or sign in to Codex CLI."
+                } else {
+                    setupStatusText = "Sign in to Codex CLI to continue."
+                }
             } else {
-                setupStatusText = status.plannerReady ? "AI setup is ready." : "Complete setup to run AI tasks."
+                if status.plannerReady {
+                    setupStatusText = "AI setup is ready."
+                } else if status.needsOpenaiKey == true {
+                    setupStatusText = "Add an OpenAI API key, or sign in to Codex CLI."
+                } else {
+                    setupStatusText = "Sign in to Codex CLI to run AI tasks."
+                }
             }
         } catch {
             setupStatusText = "Could not load setup status: \(error.localizedDescription)"
@@ -217,25 +227,22 @@ final class AppViewModel: ObservableObject {
         setupSaving = true
         defer { setupSaving = false }
 
-        let plannerCmdTrimmed = setupPlannerCmd.trimmingCharacters(in: .whitespacesAndNewlines)
         let openAIKeyTrimmed = setupOpenAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let plannerTimeout = Int(setupPlannerTimeoutSeconds) ?? 150
-        let openAITimeout = Int(setupOpenAITimeoutSeconds) ?? 60
 
         do {
             _ = try await client.updateRuntimeConfig(
-                plannerBackend: setupPlannerBackend,
-                codexMode: setupCodexMode,
-                codexBin: setupCodexBin,
-                codexPlannerModel: setupCodexPlannerModel,
-                plannerCmd: plannerCmdTrimmed.isEmpty ? nil : plannerCmdTrimmed,
-                clearPlannerCmd: plannerCmdTrimmed.isEmpty,
-                plannerTimeoutSeconds: plannerTimeout,
+                plannerBackend: "auto",
+                codexMode: "cli",
+                codexBin: setupCodexBin.isEmpty ? "codex" : setupCodexBin,
+                codexPlannerModel: "gpt-5",
+                plannerCmd: nil,
+                clearPlannerCmd: true,
+                plannerTimeoutSeconds: 150,
                 openaiAPIKey: openAIKeyTrimmed.isEmpty ? nil : openAIKeyTrimmed,
                 clearOpenAIAPIKey: false,
-                openaiModel: setupOpenAIModel,
-                openaiBaseURL: setupOpenAIBaseURL,
-                openaiTimeoutSeconds: openAITimeout
+                openaiModel: "gpt-5",
+                openaiBaseURL: "https://api.openai.com/v1",
+                openaiTimeoutSeconds: 60
             )
             setupOpenAIAPIKey = ""
             await refreshRuntimeSetup()

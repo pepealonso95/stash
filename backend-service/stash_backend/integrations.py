@@ -88,26 +88,22 @@ def codex_integration_status(runtime: RuntimeConfig) -> dict[str, Any]:
 
     required_blockers: list[str] = []
     recommendations: list[str] = []
+    needs_openai_key = False
     if runtime.planner_backend == "openai_api":
         if not openai_ready:
-            required_blockers.append("OpenAI API key is missing for OpenAI planner mode.")
-        if not codex_ready:
-            recommendations.append("Configure Codex CLI login to enable GPT-through-Codex flow.")
+            required_blockers.append("OpenAI API key is required because OpenAI planner mode is selected.")
+            needs_openai_key = True
     elif runtime.planner_backend == "codex_cli":
         if not codex_ready:
-            required_blockers.append("Codex CLI is not ready. Verify binary path and login status.")
-        if not openai_ready:
-            recommendations.append("Configure OpenAI API key for planner fallback.")
+            required_blockers.append("Codex CLI is not ready. Verify Codex is installed and run `codex login`.")
     else:
         if not codex_ready and not openai_ready:
-            required_blockers.append("Neither Codex CLI nor OpenAI API planner is ready.")
-        elif not codex_ready:
-            recommendations.append("Codex CLI is not ready; currently relying on OpenAI API planner only.")
-        if not openai_ready:
-            recommendations.append("Configure OpenAI API key for planner fallback.")
+            required_blockers.append("No AI planner is ready. Sign in to Codex CLI or add an OpenAI API key.")
+            needs_openai_key = True
 
     status["planner_ready"] = not required_blockers
     status["required_blockers"] = required_blockers
     status["recommendations"] = recommendations
+    status["needs_openai_key"] = needs_openai_key
     status["blockers"] = required_blockers
     return status

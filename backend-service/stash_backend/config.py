@@ -18,7 +18,7 @@ class Settings:
     planner_cmd: str | None = None
     planner_timeout_seconds: int = 150
     openai_api_key: str | None = None
-    openai_model: str = "gpt-5-mini"
+    openai_model: str = "gpt-5"
     openai_base_url: str = "https://api.openai.com/v1"
     openai_timeout_seconds: int = 60
     runtime_config_path: str | None = None
@@ -41,7 +41,7 @@ def load_settings() -> Settings:
         planner_cmd=os.getenv("STASH_PLANNER_CMD"),
         planner_timeout_seconds=int(os.getenv("STASH_PLANNER_TIMEOUT_SECONDS", "150")),
         openai_api_key=openai_api_key or None,
-        openai_model=os.getenv("STASH_OPENAI_MODEL", "gpt-5-mini").strip(),
+        openai_model=os.getenv("STASH_OPENAI_MODEL", "gpt-5").strip(),
         openai_base_url=os.getenv("STASH_OPENAI_BASE_URL", "https://api.openai.com/v1").strip(),
         openai_timeout_seconds=int(os.getenv("STASH_OPENAI_TIMEOUT_SECONDS", "60")),
         runtime_config_path=(os.getenv("STASH_RUNTIME_CONFIG_PATH") or "").strip() or None,

@@ -399,7 +399,7 @@ private struct SetupRequiredCard: View {
                 .font(.system(size: 11, weight: .bold, design: .rounded))
                 .foregroundStyle(CodexTheme.textSecondary)
 
-            Text("Stash uses Codex CLI for execution and GPT planning through Codex CLI when available.")
+            Text("Stash keeps setup minimal. Usually you only need Codex CLI logged in.")
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(CodexTheme.textPrimary)
 
@@ -408,14 +408,6 @@ private struct SetupRequiredCard: View {
                     Text("• \(blocker)")
                         .font(.system(size: 11, weight: .medium, design: .rounded))
                         .foregroundStyle(CodexTheme.warning)
-                }
-            }
-
-            if let recommendations = viewModel.setupStatus?.recommendations, !recommendations.isEmpty {
-                ForEach(recommendations, id: \.self) { recommendation in
-                    Text("• \(recommendation)")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .foregroundStyle(CodexTheme.textSecondary)
                 }
             }
 
@@ -448,8 +440,8 @@ private struct RuntimeSetupSheet: View {
                 .foregroundStyle(CodexTheme.textPrimary)
 
             Text(viewModel.onboardingActive
-                ? "Complete first-run setup: backend check, AI runtime config, and project selection."
-                : "Configure GPT + Codex once. Settings are stored locally by the backend, not in `.env`.")
+                ? "Only blocking setup steps are shown here."
+                : "Only essential blocking setup is shown here.")
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(CodexTheme.textSecondary)
 
@@ -473,30 +465,31 @@ private struct RuntimeSetupSheet: View {
                 )
             }
 
-            Form {
-                Picker("Planner backend", selection: $viewModel.setupPlannerBackend) {
-                    Text("Auto (Codex GPT first)").tag("auto")
-                    Text("Codex CLI primary").tag("codex_cli")
-                    Text("OpenAI API primary").tag("openai_api")
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Planner: Codex CLI (latest model)")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(CodexTheme.textPrimary)
+
+                if let resolved = viewModel.setupStatus?.codexBinResolved, !resolved.isEmpty {
+                    Text("Codex binary: \(resolved)")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(CodexTheme.textSecondary)
                 }
 
-                Picker("Execution mode", selection: $viewModel.setupCodexMode) {
-                    Text("Codex CLI").tag("cli")
-                    Text("Shell").tag("shell")
+                if viewModel.setupStatus?.needsOpenaiKey == true {
+                    SecureField("OpenAI API key (only required if Codex is unavailable)", text: $viewModel.setupOpenAIAPIKey)
+                        .textFieldStyle(.roundedBorder)
                 }
-
-                TextField("Codex binary", text: $viewModel.setupCodexBin)
-                TextField("Codex planner model", text: $viewModel.setupCodexPlannerModel)
-                TextField("Planner command override (optional)", text: $viewModel.setupPlannerCmd)
-                TextField("Planner timeout (seconds)", text: $viewModel.setupPlannerTimeoutSeconds)
-
-                Divider()
-
-                SecureField("OpenAI API key (fallback or primary)", text: $viewModel.setupOpenAIAPIKey)
-                TextField("OpenAI model", text: $viewModel.setupOpenAIModel)
-                TextField("OpenAI base URL", text: $viewModel.setupOpenAIBaseURL)
-                TextField("OpenAI timeout (seconds)", text: $viewModel.setupOpenAITimeoutSeconds)
             }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.white)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
+            )
 
             if let setupStatus = viewModel.setupStatus {
                 HStack(spacing: 10) {
@@ -523,19 +516,6 @@ private struct RuntimeSetupSheet: View {
                 }
             }
 
-            if let tips = viewModel.setupStatus?.recommendations, !tips.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Recommended:")
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .foregroundStyle(CodexTheme.textSecondary)
-                    ForEach(tips, id: \.self) { item in
-                        Text("• \(item)")
-                            .font(.system(size: 11, weight: .medium, design: .rounded))
-                            .foregroundStyle(CodexTheme.textSecondary)
-                    }
-                }
-            }
-
             if let setupStatusText = viewModel.setupStatusText {
                 Text(setupStatusText)
                     .font(.system(size: 11, weight: .medium, design: .rounded))
@@ -557,7 +537,7 @@ private struct RuntimeSetupSheet: View {
 
                 Spacer()
 
-                Button(viewModel.onboardingActive ? "Save Settings" : "Save") {
+                Button(viewModel.setupStatus?.needsOpenaiKey == true ? "Save API Key" : "Apply Defaults") {
                     Task {
                         await viewModel.saveRuntimeSetup()
                         if !viewModel.onboardingActive, viewModel.aiSetupReady {
