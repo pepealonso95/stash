@@ -276,12 +276,21 @@ def create_app(services: Services) -> FastAPI:
         return TaskStatusResponse(message_id=message_id, run_id=run["id"], status="running")
 
     @app.get("/v1/projects/{project_id}/runs/{run_id}")
-    async def get_run(project_id: str, run_id: str) -> dict[str, Any]:
+    async def get_run(
+        project_id: str,
+        run_id: str,
+        include_output: bool = Query(default=False),
+        output_char_limit: int = Query(default=4000, ge=200, le=20000),
+    ) -> dict[str, Any]:
         _context, repo = _repo_or_404(services, project_id)
         run = repo.get_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="Run not found")
-        run["steps"] = repo.list_run_steps(run_id)
+        run["steps"] = repo.list_run_steps(
+            run_id,
+            include_output=include_output,
+            output_char_limit=output_char_limit if include_output else None,
+        )
         return run
 
     @app.post("/v1/projects/{project_id}/runs/{run_id}/cancel", response_model=RunResponse)

@@ -600,7 +600,13 @@ class ProjectRepository:
             (status, dumps_json(output_data or {}), error, utc_now_iso(), step_id),
         )
 
-    def list_run_steps(self, run_id: str) -> list[dict[str, Any]]:
+    def list_run_steps(
+        self,
+        run_id: str,
+        *,
+        include_output: bool = True,
+        output_char_limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         rows = self._fetchall(
             """
             SELECT id, run_id, step_index, step_type, status, input_json, output_json, error, started_at, finished_at
@@ -610,21 +616,37 @@ class ProjectRepository:
             """,
             (run_id,),
         )
-        return [
-            {
-                "id": r["id"],
-                "run_id": r["run_id"],
-                "step_index": r["step_index"],
-                "step_type": r["step_type"],
-                "status": r["status"],
-                "input": loads_json(r.get("input_json"), {}),
-                "output": loads_json(r.get("output_json"), {}),
-                "error": r.get("error"),
-                "started_at": r["started_at"],
-                "finished_at": r.get("finished_at"),
-            }
-            for r in rows
-        ]
+        result: list[dict[str, Any]] = []
+        for r in rows:
+            output: dict[str, Any] = {}
+            if include_output:
+                loaded = loads_json(r.get("output_json"), {})
+                if isinstance(loaded, dict):
+                    output = loaded
+                if output_char_limit and output:
+                    trimmed: dict[str, Any] = {}
+                    for key, value in output.items():
+                        if isinstance(value, str) and len(value) > output_char_limit:
+                            trimmed[key] = value[:output_char_limit] + "... (truncated)"
+                        else:
+                            trimmed[key] = value
+                    output = trimmed
+
+            result.append(
+                {
+                    "id": r["id"],
+                    "run_id": r["run_id"],
+                    "step_index": r["step_index"],
+                    "step_type": r["step_type"],
+                    "status": r["status"],
+                    "input": loads_json(r.get("input_json"), {}),
+                    "output": output,
+                    "error": r.get("error"),
+                    "started_at": r["started_at"],
+                    "finished_at": r.get("finished_at"),
+                }
+            )
+        return result
 
     def add_event(self, event_type: str, *, conversation_id: str | None = None, run_id: str | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         now = utc_now_iso()

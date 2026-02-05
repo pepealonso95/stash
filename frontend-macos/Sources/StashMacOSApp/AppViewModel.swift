@@ -209,6 +209,15 @@ final class AppViewModel: ObservableObject {
             let loaded = try await client.listMessages(projectID: projectID, conversationID: conversationID)
             messages = loaded.sorted { $0.sequenceNo < $1.sequenceNo }
             errorText = nil
+        } catch BackendError.requestTimedOut {
+            errorText = "Could not load messages in time. Retrying..."
+            do {
+                let loaded = try await client.listMessages(projectID: projectID, conversationID: conversationID)
+                messages = loaded.sorted { $0.sequenceNo < $1.sequenceNo }
+                errorText = nil
+            } catch {
+                errorText = "Could not load messages: \(error.localizedDescription)"
+            }
         } catch {
             errorText = "Could not load messages: \(error.localizedDescription)"
         }

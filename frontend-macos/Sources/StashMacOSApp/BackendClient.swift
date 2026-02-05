@@ -4,6 +4,7 @@ enum BackendError: LocalizedError {
     case invalidURL
     case invalidResponse
     case httpError(code: Int, message: String)
+    case requestTimedOut
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +14,8 @@ enum BackendError: LocalizedError {
             return "Invalid response from backend."
         case let .httpError(code, message):
             return "Backend error \(code): \(message)"
+        case .requestTimedOut:
+            return "The request timed out."
         }
     }
 }
@@ -26,8 +29,8 @@ struct BackendClient {
     init(baseURL: URL) {
         self.baseURL = baseURL
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 60
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 180
         self.session = URLSession(configuration: config)
 
         let decoder = JSONDecoder()
@@ -69,9 +72,11 @@ struct BackendClient {
 
     func listMessages(projectID: String, conversationID: String) async throws -> [Message] {
         try await request(
-            path: "/v1/projects/\(projectID)/conversations/\(conversationID)/messages",
+            path: "/v1/projects/\(projectID)/conversations/\(conversationID)/messages?limit=120",
             method: "GET",
-            body: Optional<Int>.none
+            body: Optional<Int>.none,
+            timeout: 90,
+            retriesOnTimeout: 1
         )
     }
 
@@ -99,7 +104,12 @@ struct BackendClient {
     }
 
     func run(projectID: String, runID: String) async throws -> RunDetail {
-        try await request(path: "/v1/projects/\(projectID)/runs/\(runID)", method: "GET", body: Optional<Int>.none)
+        try await request(
+            path: "/v1/projects/\(projectID)/runs/\(runID)?include_output=false",
+            method: "GET",
+            body: Optional<Int>.none,
+            timeout: 30
+        )
     }
 
     func triggerIndex(projectID: String, fullScan: Bool = true) async throws {
@@ -129,7 +139,9 @@ struct BackendClient {
     private func request<Response: Decodable, Body: Encodable>(
         path: String,
         method: String,
-        body: Body?
+        body: Body?,
+        timeout: TimeInterval? = nil,
+        retriesOnTimeout: Int = 0
     ) async throws -> Response {
         guard let url = URL(string: path, relativeTo: baseURL) else {
             throw BackendError.invalidURL
@@ -138,22 +150,38 @@ struct BackendClient {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let timeout {
+            request.timeoutInterval = timeout
+        }
 
         if let body {
             request.httpBody = try encoder.encode(body)
         }
 
-        let (data, response) = try await session.data(for: request)
+        var attempts = 0
+        while true {
+            do {
+                let (data, response) = try await session.data(for: request)
 
-        guard let http = response as? HTTPURLResponse else {
-            throw BackendError.invalidResponse
+                guard let http = response as? HTTPURLResponse else {
+                    throw BackendError.invalidResponse
+                }
+
+                guard (200 ..< 300).contains(http.statusCode) else {
+                    let apiError = try? decoder.decode(APIErrorResponse.self, from: data)
+                    throw BackendError.httpError(code: http.statusCode, message: apiError?.detail ?? "Unknown server error")
+                }
+
+                return try decoder.decode(Response.self, from: data)
+            } catch let urlError as URLError where urlError.code == .timedOut {
+                if attempts < retriesOnTimeout {
+                    attempts += 1
+                    continue
+                }
+                throw BackendError.requestTimedOut
+            } catch {
+                throw error
+            }
         }
-
-        guard (200 ..< 300).contains(http.statusCode) else {
-            let apiError = try? decoder.decode(APIErrorResponse.self, from: data)
-            throw BackendError.httpError(code: http.statusCode, message: apiError?.detail ?? "Unknown server error")
-        }
-
-        return try decoder.decode(Response.self, from: data)
     }
 }
