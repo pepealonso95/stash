@@ -248,7 +248,6 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     private func makeAttachmentKey(projectID: String, documentURL: URL) -> String {
         "\(projectID)|\(documentURL.standardizedFileURL.path)"
     }
-
     private struct ImportedDropResult {
         var urls: [URL]
         var failures: [String]
