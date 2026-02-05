@@ -47,6 +47,7 @@ final class OverlayViewModel: ObservableObject {
     @Published var trayStatusText: String?
     @Published var trayErrorText: String?
     @Published var isTraySending = false
+    @Published var isTrayAwaitingResponse = false
 
     let backendClient = BackendClient()
     var stateDidChange: (() -> Void)?
@@ -375,27 +376,60 @@ struct OverlayRootView: View {
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.black.opacity(0.12)))
 
-            if !recentMessages.isEmpty {
+            if !recentMessages.isEmpty || viewModel.isTrayAwaitingResponse {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Recent")
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
                     ForEach(recentMessages) { message in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(message.role.lowercased() == "user" ? "You" : "Stash")
-                                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.secondary)
-                            Text(message.content)
-                                .font(.system(size: 12, weight: .regular, design: .rounded))
-                                .lineLimit(2)
+                        let isUserMessage = message.role.lowercased() == "user"
+                        HStack(spacing: 0) {
+                            if isUserMessage {
+                                Spacer(minLength: 28)
+                            }
+
+                            VStack(alignment: isUserMessage ? .trailing : .leading, spacing: 2) {
+                                Text(isUserMessage ? "You" : "Stash")
+                                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                                Text(message.content)
+                                    .font(.system(size: 12, weight: .regular, design: .rounded))
+                                    .lineLimit(2)
+                            }
+                            .padding(8)
+                            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.black.opacity(0.1)))
+
+                            if !isUserMessage {
+                                Spacer(minLength: 28)
+                            }
                         }
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.black.opacity(0.1)))
+                        .frame(maxWidth: .infinity)
+                    }
+                    if viewModel.isTrayAwaitingResponse {
+                        trayLoadingMessage
                     }
                 }
             }
         }
+    }
+
+    private var trayLoadingMessage: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Stash")
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Thinking...")
+                    .font(.system(size: 12, weight: .regular, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.black.opacity(0.1)))
     }
 
     private var trayFooter: some View {

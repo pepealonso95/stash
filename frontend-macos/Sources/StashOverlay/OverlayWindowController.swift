@@ -327,11 +327,30 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        let optimisticMessageID = "local-\(UUID().uuidString)"
+        let optimisticMessage = OverlayMessage(
+            id: optimisticMessageID,
+            projectId: viewModel.selectedProject?.id ?? "",
+            conversationId: "",
+            role: "user",
+            content: trimmed,
+            parentMessageId: nil,
+            sequenceNo: (viewModel.trayMessages.last?.sequenceNo ?? 0) + 1,
+            createdAt: ISO8601DateFormatter().string(from: Date())
+        )
+        viewModel.trayMessages.append(optimisticMessage)
+
         viewModel.isTrayVisible = true
         viewModel.isTraySending = true
+        viewModel.isTrayAwaitingResponse = true
         viewModel.trayErrorText = nil
         viewModel.trayStatusText = "Sending..."
-        defer { viewModel.isTraySending = false }
+        defer {
+            viewModel.isTraySending = false
+            viewModel.isTrayAwaitingResponse = false
+        }
+
+        var messageAcceptedByBackend = false
 
         do {
             let project = try await viewModel.backendClient.ensureProjectSelection(
@@ -344,6 +363,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
                 conversationID: conversation.id,
                 content: trimmed
             )
+            messageAcceptedByBackend = true
 
             await refreshTrayMessages(projectID: project.id, conversationID: conversation.id)
 
@@ -365,8 +385,14 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
                 viewModel.trayStatusText = "Message sent."
             }
         } catch {
+            if !messageAcceptedByBackend {
+                viewModel.trayMessages.removeAll { $0.id == optimisticMessageID }
+                viewModel.trayComposerText = trimmed
+            }
             viewModel.trayStatusText = nil
-            viewModel.trayErrorText = "Could not send message: \(error.localizedDescription)"
+            viewModel.trayErrorText = messageAcceptedByBackend
+                ? "Message sent, but could not refresh chat: \(error.localizedDescription)"
+                : "Could not send message: \(error.localizedDescription)"
         }
     }
 
