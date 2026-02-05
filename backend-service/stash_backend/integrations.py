@@ -36,6 +36,19 @@ def resolve_binary(binary: str) -> str | None:
     return None
 
 
+def is_codex_model_config_error(output: str) -> bool:
+    lowered = output.lower()
+    checks = (
+        "reasoning.effort",
+        "unsupported value",
+        "not supported when using codex with a chatgpt account",
+        "unsupported model",
+        "unknown model",
+        "invalid model",
+    )
+    return any(token in lowered for token in checks)
+
+
 def codex_integration_status(runtime: RuntimeConfig) -> dict[str, Any]:
     resolved = resolve_binary(runtime.codex_bin)
     openai_api_key_set = bool(runtime.openai_api_key)

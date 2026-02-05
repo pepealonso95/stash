@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 from .config import Settings
-from .integrations import resolve_binary
+from .integrations import is_codex_model_config_error, resolve_binary
 from .runtime_config import RuntimeConfig, RuntimeConfigStore
 from .types import ExecutionResult, ProjectContext, TaggedCommand
 from .utils import ensure_inside, stable_slug, utc_now_iso
@@ -230,7 +230,24 @@ class CodexExecutor:
         )
 
         if proc.returncode != 0:
-            stderr = (proc.stderr or "").strip() or "Codex CLI failed"
+            stderr = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip() or "Codex CLI failed"
+            if codex_model and is_codex_model_config_error(stderr):
+                logger.warning(
+                    "Codex execution model '%s' is incompatible; retrying command without explicit model",
+                    codex_model,
+                )
+                if self.runtime_config_store is not None:
+                    try:
+                        self.runtime_config_store.update(codex_planner_model="")
+                    except Exception:
+                        logger.exception("Could not persist codex execution model reset")
+
+                return self._run_command_via_codex_cli(
+                    cwd=cwd,
+                    command=command,
+                    codex_bin=codex_bin,
+                    codex_model=None,
+                )
             return proc.returncode, "", stderr
 
         return self._parse_codex_json_events(proc.stdout or "")

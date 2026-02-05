@@ -35,7 +35,7 @@ def build_services(settings: Settings) -> Services:
         indexer=indexer,
         scan_interval_seconds=settings.scan_interval_seconds,
     )
-    orchestrator = RunOrchestrator(project_store=project_store, planner=planner, codex=codex)
+    orchestrator = RunOrchestrator(project_store=project_store, indexer=indexer, planner=planner, codex=codex)
 
     return Services(
         settings=settings,

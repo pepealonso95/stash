@@ -235,7 +235,7 @@ final class AppViewModel: ObservableObject {
                 plannerBackend: "auto",
                 codexMode: "cli",
                 codexBin: setupCodexBin.isEmpty ? "codex" : setupCodexBin,
-                codexPlannerModel: "gpt-5",
+                codexPlannerModel: "",
                 plannerCmd: nil,
                 clearPlannerCmd: true,
                 plannerTimeoutSeconds: 150,

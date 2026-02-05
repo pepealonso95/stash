@@ -6,6 +6,7 @@ from typing import Any
 
 from .codex import CodexCommandError, CodexExecutor
 from .db import ProjectRepository
+from .indexer import IndexingService
 from .planner import Planner
 from .project_store import ProjectStore
 from .skills import load_skill_bundle
@@ -18,15 +19,22 @@ class RunOrchestrator:
         self,
         *,
         project_store: ProjectStore,
+        indexer: IndexingService,
         planner: Planner,
         codex: CodexExecutor,
     ) -> None:
         self.project_store = project_store
+        self.indexer = indexer
         self.planner = planner
         self.codex = codex
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
-    def _compose_planner_user_message(self, trigger_message: dict[str, Any]) -> str:
+    def _compose_planner_user_message(
+        self,
+        trigger_message: dict[str, Any],
+        *,
+        rag_hits: list[dict[str, Any]] | None = None,
+    ) -> str:
         content = str(trigger_message.get("content", "")).strip()
         parts = trigger_message.get("parts") or []
         if not isinstance(parts, list):
@@ -45,15 +53,27 @@ class RunOrchestrator:
             block = f"File: {path or '(unknown)'}\n{excerpt}" if excerpt else f"File: {path}"
             file_blocks.append(block[:5000])
 
-        if not file_blocks:
-            return content
+        sections: list[str] = [content]
+        if file_blocks:
+            sections.append(
+                "[Mentioned file context]\n"
+                + "\n\n".join(file_blocks[:6])
+                + "\n[/Mentioned file context]"
+            )
 
-        return (
-            f"{content}\n\n"
-            "[Mentioned file context]\n"
-            + "\n\n".join(file_blocks[:6])
-            + "\n[/Mentioned file context]"
-        ).strip()
+        if rag_hits:
+            rag_lines: list[str] = []
+            for hit in rag_hits[:6]:
+                path = str(hit.get("path_or_url") or hit.get("title") or "(unknown)")
+                score = float(hit.get("score") or 0.0)
+                excerpt = str(hit.get("text") or "").strip().replace("\r\n", "\n")
+                if len(excerpt) > 800:
+                    excerpt = excerpt[:800] + "... (truncated)"
+                rag_lines.append(f"Path: {path}\nScore: {score:.3f}\nExcerpt:\n{excerpt}")
+            if rag_lines:
+                sections.append("[Indexed context]\n" + "\n\n".join(rag_lines) + "\n[/Indexed context]")
+
+        return "\n\n".join(section for section in sections if section).strip()
 
     def start_run(self, *, project_id: str, conversation_id: str, trigger_message_id: str, mode: str) -> dict[str, Any]:
         context = self.project_store.get(project_id)
@@ -118,7 +138,18 @@ class RunOrchestrator:
 
             history = repo.list_messages(conversation_id, cursor=None, limit=500)
             skills = load_skill_bundle(context.stash_dir)
-            planner_user_message = self._compose_planner_user_message(trigger_msg)
+            rag_hits: list[dict[str, Any]] = []
+            try:
+                self.indexer.scan_project_files(context, repo)
+                rag_hits = self.indexer.search(
+                    repo,
+                    query=str(trigger_msg.get("content", ""))[:2000],
+                    limit=8,
+                )
+            except Exception:
+                logger.exception("RAG context preparation failed run_id=%s", run_id)
+
+            planner_user_message = self._compose_planner_user_message(trigger_msg, rag_hits=rag_hits)
             plan = self.planner.plan(
                 user_message=planner_user_message,
                 conversation_history=history,
@@ -137,6 +168,8 @@ class RunOrchestrator:
                     run_id=run_id,
                     payload={
                         "command_count": len(plan.commands),
+                        "rag_hit_count": len(rag_hits),
+                        "rag_paths": [str(hit.get("path_or_url") or "") for hit in rag_hits[:6]],
                         "planner_preview": plan.planner_text[:1200],
                         "commands": [command.cmd for command in plan.commands[:12]],
                     },

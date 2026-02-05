@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import shlex
 import subprocess
 import time
 from typing import Any
@@ -9,7 +11,7 @@ from urllib import error, request
 
 from .codex import ALLOWED_PREFIXES, parse_tagged_commands
 from .config import Settings
-from .integrations import resolve_binary
+from .integrations import is_codex_model_config_error, resolve_binary
 from .runtime_config import RuntimeConfig, RuntimeConfigStore
 from .types import PlanResult
 
@@ -36,6 +38,19 @@ ACTION_KEYWORDS = (
     "analyze",
     "summarize",
 )
+
+READ_HINT_KEYWORDS = (
+    "read",
+    "open",
+    "show",
+    "view",
+    "summarize",
+    "analyse",
+    "analyze",
+    "review",
+)
+
+FILE_REF_RE = re.compile(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,12}")
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +310,7 @@ class Planner:
             logger.warning("Codex planner unavailable: binary '%s' not found", runtime.codex_bin)
             return None
 
-        cmdline = [
+        base_cmdline = [
             resolved_codex,
             "exec",
             "--json",
@@ -305,6 +320,7 @@ class Planner:
             "-C",
             planning_cwd,
         ]
+        cmdline = list(base_cmdline)
         if runtime.codex_planner_model:
             cmdline.extend(["-m", runtime.codex_planner_model])
         cmdline.append("-")
@@ -330,12 +346,57 @@ class Planner:
             return None
 
         if proc.returncode != 0:
+            stderr_preview = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()[:1200]
             logger.warning(
-                "Codex planner returned non-zero exit code=%s attempt=%s",
+                "Codex planner returned non-zero exit code=%s attempt=%s stderr=%r",
                 proc.returncode,
                 attempt_label,
+                stderr_preview,
             )
-            return None
+
+            if runtime.codex_planner_model and is_codex_model_config_error(stderr_preview):
+                logger.warning(
+                    "Codex planner model '%s' is incompatible in this runtime. Retrying without explicit model.",
+                    runtime.codex_planner_model,
+                )
+                if self.runtime_config_store is not None:
+                    try:
+                        self.runtime_config_store.update(codex_planner_model="")
+                    except Exception:
+                        logger.exception("Could not persist codex planner model reset")
+
+                cmdline_no_model = [*base_cmdline, "-"]
+                try:
+                    proc = subprocess.run(
+                        cmdline_no_model,
+                        input=prompt,
+                        text=True,
+                        capture_output=True,
+                        timeout=planner_timeout,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    logger.error(
+                        "Codex planner timed out after model reset attempt=%s timeout_seconds=%s",
+                        attempt_label,
+                        planner_timeout,
+                    )
+                    return None
+                except Exception:
+                    logger.exception("Codex planner subprocess failed after model reset")
+                    return None
+
+                if proc.returncode != 0:
+                    stderr_preview = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()[:1200]
+                    logger.warning(
+                        "Codex planner no-model retry failed exit_code=%s attempt=%s stderr=%r",
+                        proc.returncode,
+                        attempt_label,
+                        stderr_preview,
+                    )
+                    return None
+            else:
+                return None
 
         jsonl_message = self._extract_agent_message_from_jsonl(proc.stdout or "")
         if jsonl_message:
@@ -359,6 +420,31 @@ class Planner:
     def _is_actionable_request(self, user_message: str) -> bool:
         lowered = user_message.lower()
         return any(keyword in lowered for keyword in ACTION_KEYWORDS)
+
+    def _heuristic_read_plan(self, *, user_message: str, project_summary: dict[str, Any]) -> PlanResult | None:
+        lowered = user_message.lower()
+        if not any(keyword in lowered for keyword in READ_HINT_KEYWORDS):
+            return None
+
+        for match in FILE_REF_RE.findall(user_message):
+            cleaned = match.strip().strip("`\"'")
+            if not cleaned or cleaned.startswith("http://") or cleaned.startswith("https://"):
+                continue
+            quoted_path = shlex.quote(cleaned)
+            project_root = str(project_summary.get("root_path") or ".")
+            planner_text = (
+                "Planner fallback recovery: reading the requested file directly.\n"
+                "<codex_cmd>\n"
+                "worktree: main\n"
+                f"cwd: {project_root}\n"
+                f"cmd: cat {quoted_path}\n"
+                "</codex_cmd>"
+            )
+            commands = parse_tagged_commands(planner_text)
+            if commands:
+                logger.info("Planner selected heuristic read fallback path file=%s", cleaned)
+                return PlanResult(planner_text=planner_text, commands=commands)
+        return None
 
     def _attempt_openai(
         self,
@@ -505,6 +591,10 @@ class Planner:
                 )
             if result is not None:
                 return result
+
+        heuristic = self._heuristic_read_plan(user_message=user_message, project_summary=project_summary)
+        if heuristic is not None:
+            return heuristic
 
         if runtime.planner_backend == "openai_api" and not self._openai_available(runtime=runtime):
             fallback_hint = "Open AI setup and add your OpenAI API key."

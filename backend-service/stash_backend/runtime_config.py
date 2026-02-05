@@ -21,7 +21,7 @@ class RuntimeConfig:
     planner_backend: str = "auto"
     codex_mode: str = "cli"
     codex_bin: str = "codex"
-    codex_planner_model: str = "gpt-5"
+    codex_planner_model: str | None = None
     planner_cmd: str | None = None
     planner_timeout_seconds: int = 150
     openai_api_key: str | None = None
@@ -35,7 +35,7 @@ class RuntimeConfig:
             planner_backend="auto",
             codex_mode=settings.codex_mode or "cli",
             codex_bin=settings.codex_bin or "codex",
-            codex_planner_model=settings.openai_model or "gpt-5",
+            codex_planner_model=None,
             planner_cmd=settings.planner_cmd,
             planner_timeout_seconds=settings.planner_timeout_seconds,
             openai_api_key=settings.openai_api_key,
@@ -70,7 +70,7 @@ class RuntimeConfigStore:
             "planner_backend": cfg.planner_backend,
             "codex_mode": cfg.codex_mode,
             "codex_bin": cfg.codex_bin,
-            "codex_planner_model": cfg.codex_planner_model,
+            "codex_planner_model": cfg.codex_planner_model or "",
             "planner_cmd": cfg.planner_cmd,
             "planner_timeout_seconds": cfg.planner_timeout_seconds,
             "openai_api_key_set": bool(cfg.openai_api_key),
@@ -119,9 +119,7 @@ class RuntimeConfigStore:
 
             if codex_planner_model is not None:
                 cleaned = codex_planner_model.strip()
-                if not cleaned:
-                    raise ValueError("codex_planner_model cannot be empty")
-                next_cfg.codex_planner_model = cleaned
+                next_cfg.codex_planner_model = cleaned or None
 
             if clear_planner_cmd:
                 next_cfg.planner_cmd = None
