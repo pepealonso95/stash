@@ -4,6 +4,9 @@ import StashMacOSCore
 import SwiftUI
 
 final class OverlayWindowController: NSWindowController, NSWindowDelegate {
+    private static let collapsedPanelSize = NSSize(width: 96, height: 96)
+    private static let trayPanelSize = NSSize(width: 360, height: 380)
+
     private let viewModel: OverlayViewModel
     private let panel: OverlayPanel
     private var projectPopover: NSPopover?
@@ -11,11 +14,12 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     private var shouldPresentProjectPickerOnActivate = false
     private var didPromptForAccessibility = false
     private var attachedDocumentKeys: Set<String> = []
+    private var trayConversationIDs: [String: String] = [:]
 
     init(viewModel: OverlayViewModel) {
         self.viewModel = viewModel
 
-        let contentRect = NSRect(x: 0, y: 0, width: 96, height: 96)
+        let contentRect = NSRect(origin: .zero, size: Self.collapsedPanelSize)
         let panel = OverlayPanel(
             contentRect: contentRect,
             styleMask: [.borderless],
@@ -27,6 +31,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         let rootView = OverlayRootView(viewModel: viewModel)
         let hostingView = DraggableHostingView(rootView: rootView)
         hostingView.frame = contentRect
+        hostingView.autoresizingMask = [.width, .height]
 
         panel.contentView = hostingView
         panel.isFloatingPanel = true
@@ -41,7 +46,13 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: panel)
         panel.delegate = self
         hostingView.onActivationClick = { [weak self] in
-            self?.handleOverlayInteraction()
+            guard let self else { return }
+            guard !self.viewModel.showsTrayInterface else { return }
+            self.handleOverlayInteraction()
+        }
+        hostingView.shouldAllowTrackpadReposition = { [weak self] in
+            guard let self else { return true }
+            return !self.viewModel.showsTrayInterface
         }
 
         viewModel.stateDidChange = { [weak self] in
@@ -52,6 +63,15 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         }
         viewModel.filesDropped = { [weak self] urls in
             self?.handleFilesDropped(urls)
+        }
+        viewModel.traySendRequested = { [weak self] message in
+            self?.handleTraySendRequested(message)
+        }
+        viewModel.trayOpenFullAppRequested = { [weak self] in
+            self?.handleTrayOpenFullAppRequested()
+        }
+        viewModel.trayProjectPickerRequested = { [weak self] in
+            self?.presentProjectPickerPopover(openWorkspaceOnSelection: false)
         }
 
         positionInitial()
@@ -95,6 +115,9 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     private func updateAppearance(animated: Bool) {
         let engaged = viewModel.isEngaged
         let targetAlpha: CGFloat = engaged ? 1.0 : 0.55
+        let targetSize = viewModel.showsTrayInterface ? Self.trayPanelSize : Self.collapsedPanelSize
+
+        updatePanelFrame(size: targetSize, animated: animated)
 
         if animated {
             NSAnimationContext.runAnimationGroup { context in
@@ -105,6 +128,21 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         } else {
             panel.alphaValue = targetAlpha
         }
+    }
+
+    private func updatePanelFrame(size: NSSize, animated: Bool) {
+        let current = panel.frame.size
+        guard abs(current.width - size.width) > 0.5 || abs(current.height - size.height) > 0.5 else {
+            return
+        }
+
+        let oldFrame = panel.frame
+        let newOrigin = NSPoint(
+            x: oldFrame.maxX - size.width,
+            y: oldFrame.maxY - size.height
+        )
+        let newFrame = NSRect(origin: newOrigin, size: size)
+        panel.setFrame(newFrame, display: true, animate: animated)
     }
 
     private func handleFilesDropped(_ urls: [URL]) {
@@ -119,26 +157,43 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         panel.makeKeyAndOrderFront(nil)
         shouldPresentProjectPickerOnActivate = false
         NSApp.activate(ignoringOtherApps: true)
+        viewModel.isTrayVisible = true
+        viewModel.isProcessingDrop = true
+        viewModel.trayErrorText = nil
+        defer { viewModel.isProcessingDrop = false }
 
         do {
             let project = try await viewModel.backendClient.ensureProjectSelection(
                 preferredProjectID: viewModel.selectedProject?.id
             )
+            viewModel.selectedProject = project
             projectPopover?.performClose(nil)
-            openWorkspaceWindow(for: project)
+
             let imported = importDroppedFiles(urls, into: project)
             guard !imported.urls.isEmpty else {
-                if !imported.failures.isEmpty {
-                    print("Asset drop import failed: \(imported.failures.joined(separator: " | "))")
-                }
+                viewModel.trayStatusText = nil
+                viewModel.trayErrorText = imported.failures.isEmpty
+                    ? "No files were imported."
+                    : imported.failures.joined(separator: " | ")
                 return
             }
+
             try await viewModel.backendClient.registerAssets(urls: imported.urls, projectID: project.id)
+            let conversation = try await ensureTrayConversation(for: project)
+            await refreshTrayMessages(projectID: project.id, conversationID: conversation.id)
+
             if !imported.failures.isEmpty {
                 print("Asset drop partially imported: \(imported.failures.joined(separator: " | "))")
+                viewModel.trayStatusText = nil
+                viewModel.trayErrorText = imported.failures.joined(separator: " | ")
+            } else {
+                viewModel.trayStatusText = nil
+                viewModel.trayErrorText = nil
             }
         } catch {
             print("Asset drop handling failed: \(error)")
+            viewModel.trayStatusText = nil
+            viewModel.trayErrorText = "Could not stash dropped items: \(error.localizedDescription)"
         }
     }
 
@@ -165,7 +220,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @MainActor
-    private func presentProjectPickerPopover() {
+    private func presentProjectPickerPopover(openWorkspaceOnSelection: Bool = true) {
         if let projectPopover, projectPopover.isShown {
             return
         }
@@ -183,7 +238,14 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return }
             self.viewModel.selectedProject = project
             self.projectPopover?.performClose(nil)
-            self.openWorkspaceWindow(for: project)
+            if openWorkspaceOnSelection {
+                self.openWorkspaceWindow(for: project)
+            } else {
+                self.viewModel.isTrayVisible = true
+                Task { [weak self] in
+                    await self?.primeTrayConversation(for: project)
+                }
+            }
         }
 
         let popover = NSPopover()
@@ -215,6 +277,158 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func handleTraySendRequested(_ message: String) {
+        Task { [weak self] in
+            await self?.sendTrayMessage(message)
+        }
+    }
+
+    private func handleTrayOpenFullAppRequested() {
+        Task { [weak self] in
+            await self?.openWorkspaceFromTray()
+        }
+    }
+
+    @MainActor
+    private func openWorkspaceFromTray() async {
+        do {
+            let project = try await viewModel.backendClient.ensureProjectSelection(
+                preferredProjectID: viewModel.selectedProject?.id
+            )
+            viewModel.selectedProject = project
+            viewModel.dismissTray()
+            viewModel.isHovered = false
+            viewModel.isActive = false
+            openWorkspaceWindow(for: project)
+        } catch {
+            viewModel.trayStatusText = nil
+            viewModel.trayErrorText = "Could not open full app: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func primeTrayConversation(for project: OverlayProject) async {
+        do {
+            let conversation = try await ensureTrayConversation(for: project)
+            await refreshTrayMessages(projectID: project.id, conversationID: conversation.id)
+            viewModel.trayErrorText = nil
+            viewModel.trayStatusText = "Project set to \(project.name)."
+        } catch {
+            viewModel.trayStatusText = nil
+            viewModel.trayErrorText = "Could not prepare tray chat: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func sendTrayMessage(_ message: String) async {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        viewModel.isTrayVisible = true
+        viewModel.isTraySending = true
+        viewModel.trayErrorText = nil
+        viewModel.trayStatusText = "Sending..."
+        defer { viewModel.isTraySending = false }
+
+        do {
+            let project = try await viewModel.backendClient.ensureProjectSelection(
+                preferredProjectID: viewModel.selectedProject?.id
+            )
+            viewModel.selectedProject = project
+            let conversation = try await ensureTrayConversation(for: project)
+            let status = try await viewModel.backendClient.sendMessage(
+                projectID: project.id,
+                conversationID: conversation.id,
+                content: trimmed
+            )
+
+            await refreshTrayMessages(projectID: project.id, conversationID: conversation.id)
+
+            if let runID = status.runId {
+                viewModel.trayStatusText = "Running..."
+                let finalStatus = try await waitForRunCompletion(projectID: project.id, runID: runID, timeoutSeconds: 35)
+                await refreshTrayMessages(projectID: project.id, conversationID: conversation.id)
+                switch finalStatus.lowercased() {
+                case "done":
+                    viewModel.trayStatusText = "Reply ready."
+                case "failed":
+                    viewModel.trayStatusText = "Run failed."
+                case "cancelled":
+                    viewModel.trayStatusText = "Run cancelled."
+                default:
+                    viewModel.trayStatusText = "Run status: \(finalStatus)."
+                }
+            } else {
+                viewModel.trayStatusText = "Message sent."
+            }
+        } catch {
+            viewModel.trayStatusText = nil
+            viewModel.trayErrorText = "Could not send message: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func ensureTrayConversation(for project: OverlayProject) async throws -> OverlayConversation {
+        let conversations = try await viewModel.backendClient.listConversations(projectID: project.id)
+
+        if let cachedID = trayConversationIDs[project.id],
+           let cached = conversations.first(where: { $0.id == cachedID })
+        {
+            return cached
+        }
+
+        if let activeID = project.activeConversationId,
+           let active = conversations.first(where: { $0.id == activeID })
+        {
+            trayConversationIDs[project.id] = active.id
+            return active
+        }
+
+        if let latest = conversations.max(by: { conversationTimestamp($0) < conversationTimestamp($1) }) {
+            trayConversationIDs[project.id] = latest.id
+            return latest
+        }
+
+        let created = try await viewModel.backendClient.createConversation(projectID: project.id, title: "Quick Tray")
+        trayConversationIDs[project.id] = created.id
+        return created
+    }
+
+    private func conversationTimestamp(_ conversation: OverlayConversation) -> String {
+        conversation.lastMessageAt ?? conversation.createdAt
+    }
+
+    @MainActor
+    private func refreshTrayMessages(projectID: String, conversationID: String) async {
+        do {
+            let loaded = try await viewModel.backendClient.listMessages(projectID: projectID, conversationID: conversationID)
+            viewModel.trayMessages = loaded.sorted(by: { $0.sequenceNo < $1.sequenceNo })
+        } catch {
+            viewModel.trayStatusText = nil
+            viewModel.trayErrorText = "Could not load chat updates: \(error.localizedDescription)"
+        }
+    }
+
+    private func waitForRunCompletion(projectID: String, runID: String, timeoutSeconds: Int) async throws -> String {
+        let timeout = UInt64(timeoutSeconds) * 1_000_000_000
+        var elapsed: UInt64 = 0
+        var lastStatus = "running"
+
+        while elapsed < timeout {
+            let run = try await viewModel.backendClient.run(projectID: projectID, runID: runID)
+            lastStatus = run.status
+            let status = run.status.lowercased()
+            if status == "done" || status == "failed" || status == "cancelled" {
+                return run.status
+            }
+
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            elapsed += 1_000_000_000
+        }
+
+        return lastStatus
     }
 
     @MainActor
@@ -367,9 +581,11 @@ final class OverlayPanel: NSPanel {
 final class DraggableHostingView<Content: View>: NSHostingView<Content> {
     private var initialLocation: NSPoint = .zero
     var onActivationClick: (() -> Void)?
+    var shouldAllowTrackpadReposition: (() -> Bool)?
 
     required init(rootView: Content) {
         onActivationClick = nil
+        shouldAllowTrackpadReposition = nil
         super.init(rootView: rootView)
     }
 
@@ -380,6 +596,7 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
 
     required init?(coder: NSCoder) {
         onActivationClick = nil
+        shouldAllowTrackpadReposition = nil
         super.init(coder: coder)
     }
 
@@ -405,6 +622,11 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        if shouldAllowTrackpadReposition?() == false {
+            super.scrollWheel(with: event)
+            return
+        }
+
         guard let window = window, event.hasPreciseScrollingDeltas else {
             super.scrollWheel(with: event)
             return

@@ -14,11 +14,11 @@ final class FileDropDelegate: DropDelegate {
     }
 
     func dropEntered(info: DropInfo) {
-        viewModel.isDragTarget = true
+        viewModel.handleDropEntered()
     }
 
     func dropExited(info: DropInfo) {
-        viewModel.isDragTarget = false
+        viewModel.handleDropExited()
     }
 
     func performDrop(info: DropInfo) -> Bool {
