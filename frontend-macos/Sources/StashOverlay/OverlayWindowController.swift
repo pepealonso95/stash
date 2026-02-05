@@ -118,8 +118,9 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         let targetSize = viewModel.showsTrayInterface ? Self.trayPanelSize : Self.collapsedPanelSize
 
         updatePanelFrame(size: targetSize, animated: animated)
+        let alphaDidChange = abs(panel.alphaValue - targetAlpha) > 0.01
 
-        if animated {
+        if animated && alphaDidChange {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.18
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
@@ -142,7 +143,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
             y: oldFrame.maxY - size.height
         )
         let newFrame = NSRect(origin: newOrigin, size: size)
-        panel.setFrame(newFrame, display: true, animate: animated)
+        panel.setFrame(newFrame, display: false, animate: animated)
     }
 
     private func handleFilesDropped(_ urls: [URL]) {
@@ -169,7 +170,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
             viewModel.selectedProject = project
             projectPopover?.performClose(nil)
 
-            let imported = importDroppedFiles(urls, into: project)
+            let imported = await importDroppedFilesInBackground(urls, into: project)
             guard !imported.urls.isEmpty else {
                 viewModel.trayStatusText = nil
                 viewModel.trayErrorText = imported.failures.isEmpty
@@ -462,12 +463,22 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     private func makeAttachmentKey(projectID: String, documentURL: URL) -> String {
         "\(projectID)|\(documentURL.standardizedFileURL.path)"
     }
+
+    private func importDroppedFilesInBackground(_ urls: [URL], into project: OverlayProject) async -> ImportedDropResult {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = Self.importDroppedFiles(urls, into: project)
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
     private struct ImportedDropResult {
         var urls: [URL]
         var failures: [String]
     }
 
-    private func importDroppedFiles(_ urls: [URL], into project: OverlayProject) -> ImportedDropResult {
+    private static func importDroppedFiles(_ urls: [URL], into project: OverlayProject) -> ImportedDropResult {
         let root = URL(fileURLWithPath: project.rootPath, isDirectory: true).standardizedFileURL
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -494,7 +505,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         return ImportedDropResult(urls: imported, failures: failures)
     }
 
-    private func transferDroppedItem(from sourceURL: URL, to destinationBase: URL, projectRoot: URL) throws -> URL {
+    private static func transferDroppedItem(from sourceURL: URL, to destinationBase: URL, projectRoot: URL) throws -> URL {
         let fm = FileManager.default
         let source = sourceURL.standardizedFileURL
         let sourceAccess = source.startAccessingSecurityScopedResource()
@@ -534,7 +545,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         return destination
     }
 
-    private func uniqueDestinationURL(for requested: URL) -> URL {
+    private static func uniqueDestinationURL(for requested: URL) -> URL {
         let fm = FileManager.default
         if !fm.fileExists(atPath: requested.path) {
             return requested
@@ -560,13 +571,13 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         return parent.appendingPathComponent(UUID().uuidString + (ext.isEmpty ? "" : ".\(ext)"))
     }
 
-    private func isInsideProject(_ candidate: URL, root: URL) -> Bool {
+    private static func isInsideProject(_ candidate: URL, root: URL) -> Bool {
         let candidatePath = candidate.standardizedFileURL.path
         let rootPath = root.standardizedFileURL.path
         return candidatePath == rootPath || candidatePath.hasPrefix(rootPath + "/")
     }
 
-    private func isDescendant(_ candidate: URL, of ancestor: URL) -> Bool {
+    private static func isDescendant(_ candidate: URL, of ancestor: URL) -> Bool {
         let candidatePath = candidate.standardizedFileURL.path
         let ancestorPath = ancestor.standardizedFileURL.path
         return candidatePath == ancestorPath || candidatePath.hasPrefix(ancestorPath + "/")

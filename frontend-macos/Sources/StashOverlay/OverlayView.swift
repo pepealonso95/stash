@@ -4,19 +4,39 @@ import UniformTypeIdentifiers
 
 final class OverlayViewModel: ObservableObject {
     @Published var isHovered = false {
-        didSet { stateDidChange?() }
+        didSet {
+            if oldValue != isHovered {
+                stateDidChange?()
+            }
+        }
     }
     @Published var isDragTarget = false {
-        didSet { stateDidChange?() }
+        didSet {
+            if oldValue != isDragTarget {
+                stateDidChange?()
+            }
+        }
     }
     @Published var isActive = false {
-        didSet { stateDidChange?() }
+        didSet {
+            if oldValue != isActive {
+                stateDidChange?()
+            }
+        }
     }
     @Published var isTrayVisible = false {
-        didSet { stateDidChange?() }
+        didSet {
+            if oldValue != isTrayVisible {
+                stateDidChange?()
+            }
+        }
     }
     @Published var isProcessingDrop = false {
-        didSet { stateDidChange?() }
+        didSet {
+            if oldValue != isProcessingDrop {
+                stateDidChange?()
+            }
+        }
     }
     @Published var lastDroppedFiles: [URL] = []
     @Published var selectedProject: OverlayProject?
@@ -36,6 +56,7 @@ final class OverlayViewModel: ObservableObject {
     var trayOpenFullAppRequested: (() -> Void)?
     var trayProjectPickerRequested: (() -> Void)?
     private let documentDetector = DocumentContextDetector()
+    private let maxTrackedDroppedFiles = 200
 
     var shouldPreviewTrayOnDrag: Bool {
         isDragTarget && !isActive
@@ -98,26 +119,41 @@ final class OverlayViewModel: ObservableObject {
     }
 
     func handleDropEntered() {
-        isDragTarget = true
-        if !isActive {
+        if !isDragTarget {
+            isDragTarget = true
+        }
+        if !isActive, !isTrayVisible {
             isTrayVisible = true
         }
     }
 
     func handleDropExited() {
-        isDragTarget = false
-        if lastDroppedFiles.isEmpty && !isProcessingDrop && !isActive {
+        if isDragTarget {
+            isDragTarget = false
+        }
+        if lastDroppedFiles.isEmpty && !isProcessingDrop && !isActive && isTrayVisible {
             isTrayVisible = false
         }
     }
 
     func handleDroppedFiles(_ urls: [URL]) {
-        guard !urls.isEmpty else { return }
-        lastDroppedFiles = urls
+        let normalized = normalizedUniqueURLs(urls)
+        guard !normalized.isEmpty else { return }
+
+        var merged = lastDroppedFiles.map(\.standardizedFileURL)
+        var seenPaths = Set(merged.map(\.path))
+        for url in normalized where seenPaths.insert(url.path).inserted {
+            merged.append(url)
+        }
+        if merged.count > maxTrackedDroppedFiles {
+            merged.removeFirst(merged.count - maxTrackedDroppedFiles)
+        }
+        lastDroppedFiles = merged
+
         isTrayVisible = true
         trayErrorText = nil
-        trayStatusText = "Preparing \(urls.count) item(s)..."
-        filesDropped?(urls)
+        trayStatusText = "Preparing \(normalized.count) item(s)..."
+        filesDropped?(normalized)
     }
 
     func submitTrayMessage() {
@@ -141,10 +177,27 @@ final class OverlayViewModel: ObservableObject {
         trayStatusText = nil
         trayErrorText = nil
     }
+
+    private func normalizedUniqueURLs(_ urls: [URL]) -> [URL] {
+        var seenPaths: Set<String> = []
+        var results: [URL] = []
+
+        for url in urls {
+            let normalized = url.standardizedFileURL
+            let path = normalized.path
+            guard !path.isEmpty else { continue }
+            if seenPaths.insert(path).inserted {
+                results.append(normalized)
+            }
+        }
+
+        return results
+    }
 }
 
 struct OverlayRootView: View {
     @ObservedObject var viewModel: OverlayViewModel
+    @FocusState private var isTrayComposerFocused: Bool
 
     private var isAnimating: Bool {
         viewModel.isHovered || viewModel.isDragTarget || viewModel.isActive || viewModel.showsTrayInterface
@@ -163,7 +216,7 @@ struct OverlayRootView: View {
     }
 
     private var visibleDroppedFiles: [URL] {
-        Array(viewModel.lastDroppedFiles.prefix(4))
+        Array(viewModel.lastDroppedFiles.suffix(2))
     }
 
     var body: some View {
@@ -192,8 +245,8 @@ struct OverlayRootView: View {
             viewModel.handleOverlayTap()
         }
         .onDrop(of: [UTType.fileURL], delegate: FileDropDelegate(viewModel: viewModel))
-        .animation(.spring(response: 0.22, dampingFraction: 0.86), value: viewModel.showsTrayInterface)
-        .animation(.easeInOut(duration: 0.16), value: viewModel.isDragTarget)
+        .animation(.easeOut(duration: 0.18), value: viewModel.showsTrayInterface)
+        .animation(.easeOut(duration: 0.12), value: viewModel.isDragTarget)
     }
 
     private var compactInterface: some View {
@@ -346,21 +399,37 @@ struct OverlayRootView: View {
     }
 
     private var trayFooter: some View {
-        HStack(alignment: .bottom, spacing: 8) {
+        HStack(alignment: .center, spacing: 8) {
             TextField("Ask a quick question...", text: $viewModel.trayComposerText, axis: .vertical)
                 .lineLimit(1 ... 3)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
+                .focused($isTrayComposerFocused)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color(nsColor: .textBackgroundColor).opacity(0.92))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(isTrayComposerFocused ? Color.accentColor : Color.black.opacity(0.15), lineWidth: isTrayComposerFocused ? 2 : 1)
+                )
                 .onSubmit {
                     viewModel.submitTrayMessage()
                 }
             Button {
                 viewModel.submitTrayMessage()
             } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 18, weight: .semibold))
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(viewModel.canSendTrayMessage ? Color.white : Color.secondary)
+                    .frame(width: 38, height: 38)
+                    .background(
+                        Circle()
+                            .fill(viewModel.canSendTrayMessage ? Color.accentColor : Color.black.opacity(0.12))
+                    )
             }
             .buttonStyle(.plain)
-            .foregroundStyle(viewModel.canSendTrayMessage ? Color.accentColor : Color.secondary)
             .disabled(!viewModel.canSendTrayMessage)
         }
     }

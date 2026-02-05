@@ -22,7 +22,9 @@ final class FileDropDelegate: DropDelegate {
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        viewModel.isDragTarget = false
+        if viewModel.isDragTarget {
+            viewModel.isDragTarget = false
+        }
         let providers = info.itemProviders(for: [UTType.fileURL])
         guard !providers.isEmpty else { return false }
 
