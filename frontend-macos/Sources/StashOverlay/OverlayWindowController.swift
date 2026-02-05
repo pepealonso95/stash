@@ -600,6 +600,10 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
         super.init(coder: coder)
     }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
     override func mouseDown(with event: NSEvent) {
         let wasKeyWindow = window?.isKeyWindow ?? false
         initialLocation = event.locationInWindow
