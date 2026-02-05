@@ -1,4 +1,4 @@
-.PHONY: install run-backend run-stack smoke-test
+.PHONY: install run-backend run-stack smoke-test install-desktop
 
 install:
 	./scripts/install_stack.sh
@@ -11,3 +11,6 @@ run-stack:
 
 smoke-test:
 	./scripts/smoke_test_backend.sh
+
+install-desktop:
+	./scripts/desktop/install_desktop_app.sh

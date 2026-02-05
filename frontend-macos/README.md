@@ -4,13 +4,16 @@ Codex-style light-mode desktop UI for Stash.
 
 ## What is implemented
 
-- Three-panel desktop app layout similar to Codex app UX
-- Folder-backed project workflow
+- Clean Codex-style light desktop layout (project picker, folder structure, chat)
+- Automatic project onboarding:
+  - If no project is open, user picks folder with the button in the UI
+  - Last opened folder is restored automatically on next launch (if still available)
+- Automatic indexing:
+  - Project indexing is triggered automatically every time a project is opened
 - File browser for current project root
-- Conversation list and message timeline
+- Conversation switcher and message timeline
 - Composer to send work requests to backend
 - Run polling and status display
-- Context search over indexed content
 
 ## Backend integration
 
@@ -45,6 +48,12 @@ Or open in Xcode:
 
 ```bash
 open frontend-macos/Package.swift
+```
+
+One-command backend + frontend launcher from repo root:
+
+```bash
+./scripts/run_stack.sh
 ```
 
 ## Main files

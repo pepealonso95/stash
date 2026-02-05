@@ -5,29 +5,29 @@ struct RootView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TopBar(viewModel: viewModel)
+            MinimalTopBar(viewModel: viewModel)
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.vertical, 10)
                 .background(CodexTheme.panel)
 
             Divider()
 
-            HStack(spacing: 0) {
-                WorkspaceSidebar(viewModel: viewModel)
-                    .frame(minWidth: 280, idealWidth: 300, maxWidth: 330)
-                    .background(CodexTheme.panel)
-
-                Divider()
-
-                FilesPanel(viewModel: viewModel)
-                    .frame(minWidth: 300, idealWidth: 340, maxWidth: 380)
-                    .background(CodexTheme.panel)
-
-                Divider()
-
-                ChatPanel(viewModel: viewModel)
+            if viewModel.project == nil {
+                EmptyProjectView(viewModel: viewModel)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(CodexTheme.canvas)
+            } else {
+                HStack(spacing: 0) {
+                    FilesPanel(viewModel: viewModel)
+                        .frame(minWidth: 300, idealWidth: 340, maxWidth: 380)
+                        .background(CodexTheme.panel)
+
+                    Divider()
+
+                    ChatPanel(viewModel: viewModel)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(CodexTheme.canvas)
+                }
             }
         }
         .background(CodexTheme.canvas)
@@ -37,151 +37,104 @@ struct RootView: View {
     }
 }
 
-private struct TopBar: View {
+private struct MinimalTopBar: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
-        HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Stash")
-                    .font(.system(size: 22, weight: .semibold, design: .rounded))
-                    .foregroundStyle(CodexTheme.textPrimary)
-                Text("Codex-style workspace")
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(CodexTheme.textSecondary)
-            }
+        HStack(spacing: 12) {
+            Text("Stash")
+                .font(.system(size: 21, weight: .semibold, design: .rounded))
+                .foregroundStyle(CodexTheme.textPrimary)
 
-            Spacer(minLength: 24)
+            Spacer()
 
-            HStack(spacing: 8) {
-                Image(systemName: viewModel.backendConnected ? "bolt.horizontal.fill" : "bolt.slash")
-                    .foregroundStyle(viewModel.backendConnected ? CodexTheme.success : CodexTheme.warning)
-                TextField("Backend URL", text: $viewModel.backendURLText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 280)
-                Button("Connect") {
-                    viewModel.configureBackend()
-                    Task { await viewModel.pingBackend() }
+            Button {
+                viewModel.presentProjectPicker()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "folder")
+                    Text(viewModel.project?.name ?? "Choose Project Folder")
+                        .lineLimit(1)
                 }
-                .buttonStyle(.borderedProminent)
-            }
-
-            Text(viewModel.backendStatusText)
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(viewModel.backendConnected ? CodexTheme.success : CodexTheme.warning)
-
-            Button("Open Folder") {
-                viewModel.chooseProjectFolder()
+                .foregroundStyle(CodexTheme.textPrimary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.white)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(CodexTheme.border, lineWidth: 1)
+                )
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.plain)
+
+            StatusBadge(
+                text: viewModel.backendConnected ? "Backend Connected" : "Backend Offline",
+                color: viewModel.backendConnected ? CodexTheme.success : CodexTheme.warning
+            )
+
+            if let indexingStatusText = viewModel.indexingStatusText {
+                StatusBadge(text: indexingStatusText, color: CodexTheme.accent)
+            }
+
+            if let runStatusText = viewModel.runStatusText {
+                StatusBadge(text: runStatusText, color: viewModel.runInProgress ? CodexTheme.accent : CodexTheme.textSecondary)
+            }
         }
     }
 }
 
-private struct WorkspaceSidebar: View {
+private struct StatusBadge: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .foregroundStyle(color)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule()
+                    .fill(Color.white)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
+            )
+    }
+}
+
+private struct EmptyProjectView: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Group {
-                Text("Project")
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .foregroundStyle(CodexTheme.textSecondary)
+        VStack(spacing: 14) {
+            Text("Choose a project folder to start")
+                .font(.system(size: 24, weight: .semibold, design: .rounded))
+                .foregroundStyle(CodexTheme.textPrimary)
 
-                if let project = viewModel.project {
-                    Text(project.name)
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(CodexTheme.textPrimary)
-                    Text(project.rootPath)
-                        .font(.system(size: 11, weight: .regular, design: .monospaced))
-                        .foregroundStyle(CodexTheme.textSecondary)
-                        .lineLimit(3)
-                } else {
-                    Text("No project selected")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(CodexTheme.textSecondary)
-                }
+            Text("Stash will automatically index the folder when you open it.")
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(CodexTheme.textSecondary)
+
+            Button("Pick Folder") {
+                viewModel.presentProjectPicker()
             }
-
-            HStack(spacing: 8) {
-                Button("New Chat") {
-                    Task { await viewModel.createConversation() }
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button("Index") {
-                    Task { await viewModel.triggerIndex() }
-                }
-                .buttonStyle(.bordered)
-            }
-
-            if let runStatusText = viewModel.runStatusText {
-                Text(runStatusText)
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(viewModel.runInProgress ? CodexTheme.accent : CodexTheme.textSecondary)
-                    .padding(.vertical, 4)
-            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
 
             if let errorText = viewModel.errorText {
                 Text(errorText)
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundStyle(CodexTheme.danger)
-                    .padding(8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.red.opacity(0.08))
-                    )
-            }
-
-            Divider()
-
-            HStack {
-                Text("Conversations")
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .foregroundStyle(CodexTheme.textSecondary)
-                Spacer()
-                Button {
-                    Task { await viewModel.refreshConversations() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-            }
-
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    ForEach(viewModel.conversations) { conversation in
-                        Button {
-                            Task { await viewModel.selectConversation(id: conversation.id) }
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(conversation.title)
-                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(CodexTheme.textPrimary)
-                                    .lineLimit(1)
-                                Text(conversation.lastMessageAt ?? conversation.createdAt)
-                                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                                    .foregroundStyle(CodexTheme.textSecondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(viewModel.selectedConversationID == conversation.id ? CodexTheme.userBubble : Color.white)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .stroke(CodexTheme.border.opacity(0.55), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.bottom, 8)
+                    .padding(.top, 6)
             }
         }
-        .padding(14)
+        .padding(32)
     }
 }
 
@@ -190,18 +143,9 @@ private struct FilesPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Files")
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .foregroundStyle(CodexTheme.textSecondary)
-                Spacer()
-                Button {
-                    viewModel.refreshFiles()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-            }
+            Text("Folder Structure")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(CodexTheme.textSecondary)
 
             TextField("Filter files", text: $viewModel.fileQuery)
                 .textFieldStyle(.roundedBorder)
@@ -226,30 +170,43 @@ private struct FilesPanel: View {
 
 private struct ChatPanel: View {
     @ObservedObject var viewModel: AppViewModel
-    @State private var searchText = ""
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(viewModel.selectedConversation?.title ?? "No Conversation")
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(CodexTheme.textPrimary)
-                    Text(viewModel.project?.name ?? "Choose a project folder")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .foregroundStyle(CodexTheme.textSecondary)
-                }
+                Text("Chat")
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(CodexTheme.textPrimary)
 
                 Spacer()
 
-                TextField("Search indexed context", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 260)
-
-                Button("Search") {
-                    Task { await viewModel.searchContext(query: searchText) }
+                Menu {
+                    ForEach(viewModel.conversations) { conversation in
+                        Button(conversation.title) {
+                            Task { await viewModel.selectConversation(id: conversation.id) }
+                        }
+                    }
+                    Divider()
+                    Button("New Chat") {
+                        Task { await viewModel.createConversation() }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(viewModel.selectedConversation?.title ?? "Conversation")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(CodexTheme.textPrimary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.white))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(CodexTheme.border, lineWidth: 1)
+                    )
                 }
-                .buttonStyle(.bordered)
+                .menuStyle(.borderlessButton)
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 12)
@@ -258,11 +215,11 @@ private struct ChatPanel: View {
             Divider()
 
             if viewModel.messages.isEmpty {
-                VStack(spacing: 14) {
-                    Text("Start by asking Stash to work on project files")
-                        .font(.system(size: 18, weight: .semibold, design: .rounded))
+                VStack(spacing: 10) {
+                    Text("Ask Stash to work on your files")
+                        .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .foregroundStyle(CodexTheme.textPrimary)
-                    Text("Use plain language or send tagged commands between <codex_cmd> blocks.")
+                    Text("Type what you want done and run it.")
                         .font(.system(size: 13, weight: .medium, design: .rounded))
                         .foregroundStyle(CodexTheme.textSecondary)
                 }
@@ -272,24 +229,27 @@ private struct ChatPanel: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            if !viewModel.searchHits.isEmpty {
-                SearchHitStrip(hits: viewModel.searchHits)
+            if let errorText = viewModel.errorText {
+                Text(errorText)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(CodexTheme.danger)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 18)
-                    .padding(.bottom, 8)
+                    .padding(.top, 8)
             }
 
             Divider()
 
             VStack(spacing: 10) {
                 TextEditor(text: $viewModel.composerText)
-                    .font(.system(size: 13, weight: .regular, design: .monospaced))
+                    .font(.system(size: 13, weight: .regular, design: .rounded))
                     .frame(minHeight: 96, maxHeight: 140)
                     .padding(6)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.white))
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(CodexTheme.border, lineWidth: 1))
 
                 HStack {
-                    Text(viewModel.runInProgress ? "Run in progress..." : "Ready")
+                    Text(viewModel.runInProgress ? "Running..." : "Ready")
                         .font(.system(size: 11, weight: .medium, design: .rounded))
                         .foregroundStyle(viewModel.runInProgress ? CodexTheme.accent : CodexTheme.textSecondary)
                     Spacer()
@@ -370,42 +330,6 @@ private struct MessageRow: View {
             .frame(maxWidth: 780, alignment: .leading)
 
             if !isUser { Spacer(minLength: 60) }
-        }
-    }
-}
-
-private struct SearchHitStrip: View {
-    let hits: [SearchHit]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Context Hits")
-                .font(.system(size: 11, weight: .bold, design: .rounded))
-                .foregroundStyle(CodexTheme.textSecondary)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(hits) { hit in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(hit.title ?? hit.pathOrUrl ?? "Indexed chunk")
-                                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                                .foregroundStyle(CodexTheme.textPrimary)
-                                .lineLimit(1)
-                            Text(hit.text)
-                                .font(.system(size: 10, weight: .regular, design: .rounded))
-                                .foregroundStyle(CodexTheme.textSecondary)
-                                .lineLimit(2)
-                        }
-                        .padding(8)
-                        .frame(width: 220, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(CodexTheme.border.opacity(0.7), lineWidth: 1)
-                        )
-                    }
-                }
-            }
         }
     }
 }

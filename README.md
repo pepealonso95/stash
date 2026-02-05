@@ -89,11 +89,13 @@ make install
 make run-backend
 make run-stack
 make smoke-test
+make install-desktop
 ```
 
 Frontend run/integration notes:
 - `docs/FRONTEND_BACKEND_RUN.md`
 - `frontend-macos/README.md`
+- `docs/DESKTOP_INSTALLER.md`
 
 ## License
 TBD

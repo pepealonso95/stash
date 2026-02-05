@@ -3,7 +3,6 @@ import Foundation
 
 @MainActor
 final class AppViewModel: ObservableObject {
-    @Published var backendURLText: String
     @Published var backendConnected = false
     @Published var backendStatusText = "Backend offline"
 
@@ -20,16 +19,19 @@ final class AppViewModel: ObservableObject {
     @Published var isSending = false
     @Published var runStatusText: String?
     @Published var runInProgress = false
+    @Published var indexingStatusText: String?
 
-    @Published var searchHits: [SearchHit] = []
     @Published var errorText: String?
 
     private var runPollTask: Task<Void, Never>?
+    private var didBootstrap = false
+    private var isPresentingProjectPicker = false
+    private let defaults = UserDefaults.standard
+    private let lastProjectPathKey = "stash.lastProjectPath"
     private var client: BackendClient
 
     init() {
         let defaultURL = ProcessInfo.processInfo.environment["STASH_BACKEND_URL"] ?? "http://127.0.0.1:8765"
-        backendURLText = defaultURL
         client = BackendClient(baseURL: URL(string: defaultURL) ?? URL(string: "http://127.0.0.1:8765")!)
     }
 
@@ -50,16 +52,18 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func configureBackend() {
-        guard let baseURL = URL(string: backendURLText.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            errorText = "Invalid backend URL"
+    func bootstrap() async {
+        guard !didBootstrap else { return }
+        didBootstrap = true
+
+        await pingBackend()
+
+        if let lastPath = defaults.string(forKey: lastProjectPathKey),
+           FileManager.default.fileExists(atPath: lastPath)
+        {
+            await openProject(url: URL(fileURLWithPath: lastPath))
             return
         }
-        client = BackendClient(baseURL: baseURL)
-    }
-
-    func bootstrap() async {
-        await pingBackend()
     }
 
     func pingBackend() async {
@@ -75,7 +79,11 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func chooseProjectFolder() {
+    func presentProjectPicker() {
+        guard !isPresentingProjectPicker else { return }
+        isPresentingProjectPicker = true
+        defer { isPresentingProjectPicker = false }
+
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -84,17 +92,21 @@ final class AppViewModel: ObservableObject {
 
         if panel.runModal() == .OK, let url = panel.url {
             Task { await openProject(url: url) }
+        } else if project == nil {
+            errorText = "No project selected. Pick a folder to start using Stash."
         }
     }
 
     func openProject(url: URL) async {
-        configureBackend()
         do {
             let opened = try await client.createOrOpenProject(name: url.lastPathComponent, rootPath: url.path)
             project = opened
             projectRootURL = url
+            defaults.set(url.path, forKey: lastProjectPathKey)
+
             refreshFiles()
             await refreshConversations()
+            await autoIndexCurrentProject()
             await pingBackend()
             errorText = nil
         } catch {
@@ -107,8 +119,15 @@ final class AppViewModel: ObservableObject {
 
         do {
             let loaded = try await client.listConversations(projectID: projectID)
-            conversations = loaded
+            if loaded.isEmpty {
+                let conversation = try await client.createConversation(projectID: projectID, title: "General")
+                conversations = [conversation]
+                selectedConversationID = conversation.id
+                await loadMessages(conversationID: conversation.id)
+                return
+            }
 
+            conversations = loaded
             if let selectedConversationID, loaded.contains(where: { $0.id == selectedConversationID }) {
                 await loadMessages(conversationID: selectedConversationID)
             } else {
@@ -167,34 +186,18 @@ final class AppViewModel: ObservableObject {
         files = FileScanner.scan(rootURL: projectRootURL)
     }
 
-    func triggerIndex() async {
+    func autoIndexCurrentProject() async {
         guard let projectID = project?.id else {
-            errorText = "Open a project first"
             return
         }
 
+        indexingStatusText = "Auto-indexing project..."
         do {
             try await client.triggerIndex(projectID: projectID)
-            runStatusText = "Indexing started"
-            errorText = nil
+            indexingStatusText = "Indexing started"
         } catch {
-            errorText = "Could not trigger indexing: \(error.localizedDescription)"
-        }
-    }
-
-    func searchContext(query: String) async {
-        guard let projectID = project?.id else { return }
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            searchHits = []
-            return
-        }
-
-        do {
-            let response = try await client.search(projectID: projectID, query: trimmed, limit: 6)
-            searchHits = response.hits
-        } catch {
-            errorText = "Search failed: \(error.localizedDescription)"
+            indexingStatusText = nil
+            errorText = "Could not auto-index project: \(error.localizedDescription)"
         }
     }
 
@@ -244,7 +247,7 @@ final class AppViewModel: ObservableObject {
     private func pollRun(projectID: String, conversationID: String, runID: String) async {
         runPollTask?.cancel()
         runInProgress = true
-        runStatusText = "Run started"
+        runStatusText = "Running..."
 
         runPollTask = Task {
             defer {
