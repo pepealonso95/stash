@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from .codex import CodexCommandError, CodexExecutor
@@ -8,6 +9,8 @@ from .db import ProjectRepository
 from .planner import Planner
 from .project_store import ProjectStore
 from .skills import load_skill_bundle
+
+logger = logging.getLogger(__name__)
 
 
 class RunOrchestrator:
@@ -40,6 +43,13 @@ class RunOrchestrator:
             )
         )
         self._tasks[run["id"]] = task
+        logger.info(
+            "Run started run_id=%s project_id=%s conversation_id=%s mode=%s",
+            run["id"],
+            project_id,
+            conversation_id,
+            mode,
+        )
         return run
 
     async def cancel_run(self, *, project_id: str, run_id: str) -> dict[str, Any] | None:
@@ -84,6 +94,11 @@ class RunOrchestrator:
                 conversation_history=history,
                 skill_bundle=skills,
                 project_summary=repo.project_view(),
+            )
+            logger.info(
+                "Planner produced run_id=%s commands=%s",
+                run_id,
+                len(plan.commands),
             )
 
             tool_summaries: list[str] = []

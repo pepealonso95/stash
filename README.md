@@ -82,6 +82,7 @@ Run commands:
 ./scripts/run_backend.sh
 ./scripts/run_stack.sh
 ./scripts/smoke_test_backend.sh
+./scripts/integration_test_codex_cli_mock.sh
 ```
 
 Equivalent `make` targets:
@@ -91,6 +92,7 @@ make install
 make run-backend
 make run-stack
 make smoke-test
+make integration-test-codex-cli
 make install-desktop
 ```
 

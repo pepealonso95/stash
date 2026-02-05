@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
 from typing import Any
@@ -12,6 +13,8 @@ from .types import PlanResult
 MAX_HISTORY_ITEMS = 20
 MAX_HISTORY_CONTENT_CHARS = 1200
 MAX_SKILLS_CHARS = 12000
+
+logger = logging.getLogger(__name__)
 
 
 class Planner:
@@ -32,12 +35,15 @@ class Planner:
                 check=False,
             )
         except Exception:
+            logger.exception("External planner command failed to start")
             return None
 
         if proc.returncode != 0:
+            logger.warning("External planner returned non-zero exit code=%s", proc.returncode)
             return None
 
         output = (proc.stdout or "").strip()
+        logger.info("External planner produced output chars=%s", len(output))
         return output if output else None
 
     def _codex_available(self) -> bool:
@@ -119,6 +125,7 @@ class Planner:
         project_summary: dict[str, Any],
     ) -> str | None:
         if not self._codex_available():
+            logger.warning("Codex planner unavailable: binary '%s' not found", self.settings.codex_bin)
             return None
 
         planning_cwd = str(project_summary.get("root_path") or ".")
@@ -151,16 +158,28 @@ class Planner:
                 check=False,
             )
         except Exception:
+            logger.exception("Codex planner subprocess failed")
             return None
 
         if proc.returncode != 0:
+            logger.warning("Codex planner returned non-zero exit code=%s", proc.returncode)
             return None
 
         jsonl_message = self._extract_agent_message_from_jsonl(proc.stdout or "")
         if jsonl_message:
+            logger.info(
+                "Codex planner produced agent message chars=%s commands=%s",
+                len(jsonl_message),
+                len(parse_tagged_commands(jsonl_message)),
+            )
             return jsonl_message
 
         output = (proc.stdout or "").strip()
+        logger.info(
+            "Codex planner produced raw stdout chars=%s commands=%s",
+            len(output),
+            len(parse_tagged_commands(output)),
+        )
         return output if output else None
 
     def plan(
@@ -173,6 +192,7 @@ class Planner:
     ) -> PlanResult:
         direct_commands = parse_tagged_commands(user_message)
         if direct_commands:
+            logger.info("Planner using direct tagged commands count=%s", len(direct_commands))
             return PlanResult(
                 planner_text=f"Executing {len(direct_commands)} tagged command(s) from user input.",
                 commands=direct_commands,
@@ -192,6 +212,7 @@ class Planner:
         external_text = self._run_external_planner(external_payload)
         if external_text:
             commands = parse_tagged_commands(external_text)
+            logger.info("Planner selected external planner path commands=%s", len(commands))
             return PlanResult(planner_text=external_text, commands=commands)
 
         codex_text = self._run_codex_planner(
@@ -202,6 +223,7 @@ class Planner:
         )
         if codex_text:
             commands = parse_tagged_commands(codex_text)
+            logger.info("Planner selected codex planner path commands=%s", len(commands))
             return PlanResult(planner_text=codex_text, commands=commands)
 
         fallback = (
@@ -209,4 +231,5 @@ class Planner:
             "Verify Codex CLI is installed and logged in (`codex login status`), "
             "or provide a custom planner via STASH_PLANNER_CMD."
         )
+        logger.error("Planner fallback reached: no commands generated")
         return PlanResult(planner_text=fallback, commands=[])

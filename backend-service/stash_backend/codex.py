@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shlex
 import subprocess
@@ -11,6 +12,7 @@ from .types import ExecutionResult, ProjectContext, TaggedCommand
 from .utils import ensure_inside, stable_slug, utc_now_iso
 
 TAG_RE = re.compile(r"<codex_cmd>(.*?)</codex_cmd>", flags=re.DOTALL | re.IGNORECASE)
+logger = logging.getLogger(__name__)
 
 ALLOWED_PREFIXES = {
     "ls",
@@ -233,6 +235,13 @@ class CodexExecutor:
 
         started_at = utc_now_iso()
         engine = "shell"
+        logger.info(
+            "Executing command mode=%s worktree=%s cwd=%s cmd=%s",
+            self.settings.codex_mode,
+            command.worktree or "default",
+            str(cwd),
+            command.cmd.replace("\n", " ")[:300],
+        )
 
         try:
             if self.settings.codex_mode == "cli":
@@ -247,14 +256,17 @@ class CodexExecutor:
                 exit_code, stdout, shell_stderr = self._run_command_via_shell(cwd=cwd, command=command.cmd)
                 stderr = f"codex binary not found; executed via shell fallback\n{shell_stderr}"
                 engine = "shell-fallback"
+                logger.warning("Codex binary missing; used shell fallback")
             else:
                 raise CodexCommandError("Execution binary not found")
         except subprocess.TimeoutExpired as exc:
             exit_code = 124
             stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
             stderr = "Command timed out after 600 seconds"
+            logger.error("Command timed out after 600s")
 
         finished_at = utc_now_iso()
+        logger.info("Execution finished engine=%s exit_code=%s", engine, exit_code)
         return ExecutionResult(
             engine=engine,
             exit_code=exit_code,

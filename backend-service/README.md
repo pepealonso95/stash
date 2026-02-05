@@ -66,6 +66,12 @@ STASH_FRONTEND_CONFIG_PATH="/absolute/path/to/Backend.xcconfig" ./scripts/instal
 ./scripts/smoke_test_backend.sh
 ```
 
+Codex CLI integration test (mocked Codex binary, full planner+executor API path):
+
+```bash
+./scripts/integration_test_codex_cli_mock.sh
+```
+
 ## Key env vars
 
 - `STASH_HOST` (default `127.0.0.1`)
@@ -77,6 +83,7 @@ STASH_FRONTEND_CONFIG_PATH="/absolute/path/to/Backend.xcconfig" ./scripts/instal
 - `STASH_CODEX_BIN` (default `codex`)
 - `STASH_PLANNER_CMD` (optional external planner command)
 - `STASH_PLANNER_TIMEOUT_SECONDS` (default `150`)
+- `STASH_LOG_LEVEL` (default `INFO`)
 
 ## Notes
 
@@ -84,3 +91,4 @@ STASH_FRONTEND_CONFIG_PATH="/absolute/path/to/Backend.xcconfig" ./scripts/instal
 - Ensure local auth is ready: `codex login status` should report logged in.
 - Tagged command protocol is still supported directly for explicit runs.
 - The vector index uses local hashed embeddings by default, so no cloud dependency is required for search.
+- Integration diagnostics endpoint: `GET /health/integrations`

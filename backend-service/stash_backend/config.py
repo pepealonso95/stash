@@ -17,6 +17,7 @@ class Settings:
     codex_bin: str = "codex"
     planner_cmd: str | None = None
     planner_timeout_seconds: int = 150
+    log_level: str = "INFO"
     enable_hidden_files: bool = False
 
 
@@ -33,5 +34,6 @@ def load_settings() -> Settings:
         codex_bin=os.getenv("STASH_CODEX_BIN", "codex").strip(),
         planner_cmd=os.getenv("STASH_PLANNER_CMD"),
         planner_timeout_seconds=int(os.getenv("STASH_PLANNER_TIMEOUT_SECONDS", "150")),
+        log_level=os.getenv("STASH_LOG_LEVEL", "INFO").strip().upper(),
         enable_hidden_files=os.getenv("STASH_ENABLE_HIDDEN_FILES", "false").strip().lower() == "true",
     )

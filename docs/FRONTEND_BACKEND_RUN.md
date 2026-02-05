@@ -47,6 +47,12 @@ Expected:
 {"ok":true}
 ```
 
+Integration diagnostics (Codex mode/binary/login status):
+
+```bash
+curl http://127.0.0.1:8765/health/integrations
+```
+
 ## 3) Start full stack helper
 
 ```bash
@@ -85,6 +91,12 @@ swift run
 
 ```bash
 ./scripts/smoke_test_backend.sh
+```
+
+Codex CLI planner/executor integration test with a mocked Codex binary:
+
+```bash
+./scripts/integration_test_codex_cli_mock.sh
 ```
 
 This validates project creation, history, indexing/search, tagged command run execution, and portable `.stash/` state.

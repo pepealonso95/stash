@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from .db import ProjectRepository
+from .integrations import codex_integration_status
 from .schemas import (
     AssetCreateRequest,
     AssetResponse,
@@ -67,6 +68,10 @@ def create_app(services: Services) -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {"ok": True}
+
+    @app.get("/health/integrations")
+    async def health_integrations() -> dict[str, Any]:
+        return codex_integration_status(services.settings)
 
     @app.post("/v1/projects", response_model=ProjectResponse)
     async def create_or_open_project(request: ProjectCreateRequest) -> ProjectResponse:
