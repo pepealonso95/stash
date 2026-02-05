@@ -18,3 +18,7 @@ backend-service/.venv/
 # SwiftPM artifacts
 frontend-macos/.build/
 frontend-macos/.swiftpm/
+
+# Generated build artifacts
+backend-service/build/
+frontend-macos/Resources/AppIcon.iconset/

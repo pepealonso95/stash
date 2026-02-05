@@ -25,6 +25,22 @@ STASH_BACKEND_URL="http://127.0.0.1:8765" \
 ./scripts/desktop/install_desktop_app.sh
 ```
 
+## App Icon
+
+Default icon source image:
+
+```text
+frontend-macos/Resources/AppIcon-source.png
+```
+
+Installer converts this to `.icns` and embeds it in the app bundle.
+
+You can override icon source:
+
+```bash
+STASH_ICON_SOURCE="/absolute/path/to/icon.png" ./scripts/desktop/install_desktop_app.sh
+```
+
 ## Run
 
 Double-click the installed app bundle (for example on Desktop).

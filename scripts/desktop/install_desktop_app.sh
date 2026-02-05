@@ -12,6 +12,8 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 BACKEND_URL="${STASH_BACKEND_URL:-http://127.0.0.1:8765}"
 RUNTIME_BASE="${STASH_RUNTIME_BASE:-$HOME/Library/Application Support/StashLocal/runtime}"
 BACKEND_VENV="$RUNTIME_BASE/.venv"
+ICON_SOURCE="${STASH_ICON_SOURCE:-$ROOT_DIR/frontend-macos/Resources/AppIcon-source.png}"
+ICON_ICNS="${STASH_ICON_ICNS:-$ROOT_DIR/frontend-macos/Resources/AppIcon.icns}"
 
 log() {
   printf '[stash-installer] %s\n' "$1"
@@ -63,6 +65,13 @@ log "Building frontend release binary"
   swift build -c release
 )
 
+if [ -f "$ICON_SOURCE" ]; then
+  log "Building app icon from $ICON_SOURCE"
+  STASH_ICON_SOURCE="$ICON_SOURCE" STASH_ICNS_OUT="$ICON_ICNS" "$ROOT_DIR/scripts/desktop/build_icns.sh"
+else
+  log "Icon source not found at $ICON_SOURCE; keeping default app icon"
+fi
+
 FRONTEND_BIN="$(find_frontend_release_binary)"
 if [ -z "$FRONTEND_BIN" ] || [ ! -x "$FRONTEND_BIN" ]; then
   echo "Could not locate built frontend binary." >&2
@@ -83,6 +92,9 @@ PY
 
 cp "$FRONTEND_BIN" "$APP_RESOURCES/StashMacOSApp"
 chmod +x "$APP_RESOURCES/StashMacOSApp"
+if [ -f "$ICON_ICNS" ]; then
+  cp "$ICON_ICNS" "$APP_RESOURCES/AppIcon.icns"
+fi
 
 cat > "$APP_CONTENTS/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -103,6 +115,8 @@ cat > "$APP_CONTENTS/Info.plist" << 'PLIST'
   <string>APPL</string>
   <key>CFBundleExecutable</key>
   <string>StashDesktopLauncher</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>LSUIElement</key>
