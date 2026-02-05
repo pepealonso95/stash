@@ -50,12 +50,21 @@ Behavior:
 
 - Starts backend
 - Opens an `.xcodeproj` if found in the repo (excluding `.git`, `.venv`, `backend-service`)
+- If no `.xcodeproj` exists but `frontend-macos/Package.swift` exists, opens that Swift package in Xcode
 - Or opens the path from `STASH_FRONTEND_PROJECT_PATH` if provided
 
 Example:
 
 ```bash
 STASH_FRONTEND_PROJECT_PATH="/absolute/path/to/App.xcodeproj" ./scripts/run_stack.sh
+```
+
+Swift Package frontend build/run:
+
+```bash
+cd frontend-macos
+swift build
+swift run
 ```
 
 ## 4) Minimal frontend boot sequence

@@ -23,6 +23,11 @@ if [ -n "$FRONTEND_PROJECT_PATH" ] && [ -d "$FRONTEND_PROJECT_PATH" ]; then
   echo "Opening frontend project: $FRONTEND_PROJECT_PATH"
   open "$FRONTEND_PROJECT_PATH"
 else
+  FRONTEND_PACKAGE=""
+  if [ -f "$ROOT_DIR/frontend-macos/Package.swift" ]; then
+    FRONTEND_PACKAGE="$ROOT_DIR/frontend-macos/Package.swift"
+  fi
+
   XCODEPROJ="$(find "$ROOT_DIR" -maxdepth 4 -type d -name '*.xcodeproj' \
     ! -path "$ROOT_DIR/.git/*" \
     ! -path "$ROOT_DIR/.venv/*" \
@@ -31,8 +36,11 @@ else
   if [ -n "$XCODEPROJ" ]; then
     echo "Opening frontend project: $XCODEPROJ"
     open "$XCODEPROJ"
+  elif [ -n "$FRONTEND_PACKAGE" ]; then
+    echo "Opening frontend Swift package: $FRONTEND_PACKAGE"
+    open "$FRONTEND_PACKAGE"
   else
-    echo "No frontend Xcode project found."
+    echo "No frontend Xcode project or Swift package found."
     echo "Set STASH_FRONTEND_PROJECT_PATH to an .xcodeproj if needed."
     echo "Backend stays running. Press Ctrl+C to stop."
   fi

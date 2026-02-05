@@ -93,6 +93,7 @@ make smoke-test
 
 Frontend run/integration notes:
 - `docs/FRONTEND_BACKEND_RUN.md`
+- `frontend-macos/README.md`
 
 ## License
 TBD

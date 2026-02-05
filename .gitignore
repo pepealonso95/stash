@@ -14,3 +14,7 @@ backend-service/.venv/
 
 # Packaging artifacts
 *.egg-info/
+
+# SwiftPM artifacts
+frontend-macos/.build/
+frontend-macos/.swiftpm/
