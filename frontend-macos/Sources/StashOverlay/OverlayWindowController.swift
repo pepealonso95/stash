@@ -9,6 +9,8 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     private var projectPopover: NSPopover?
     private var workspaceWindowControllers: [String: ProjectWorkspaceWindowController] = [:]
     private var shouldPresentProjectPickerOnActivate = false
+    private var didPromptForAccessibility = false
+    private var attachedDocumentKeys: Set<String> = []
 
     init(viewModel: OverlayViewModel) {
         self.viewModel = viewModel
@@ -137,9 +139,19 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
             return
         }
 
-        shouldPresentProjectPickerOnActivate = true
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+
+        if let detectedDocument = viewModel.detectedDocument {
+            shouldPresentProjectPickerOnActivate = false
+            Task { [weak self] in
+                await self?.processDetectedDocumentInteraction(detectedDocument)
+            }
+            return
+        }
+
+        maybePromptForAccessibilityAccess()
+        shouldPresentProjectPickerOnActivate = true
     }
 
     @MainActor
@@ -194,6 +206,38 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    @MainActor
+    private func processDetectedDocumentInteraction(_ detectedDocument: DetectedDocumentContext) async {
+        do {
+            let project = try await viewModel.backendClient.ensureProjectSelection(
+                preferredProjectID: viewModel.selectedProject?.id
+            )
+            projectPopover?.performClose(nil)
+            openWorkspaceWindow(for: project)
+
+            let attachmentKey = makeAttachmentKey(projectID: project.id, documentURL: detectedDocument.url)
+            guard !attachedDocumentKeys.contains(attachmentKey) else { return }
+
+            try await viewModel.backendClient.registerAssets(urls: [detectedDocument.url], projectID: project.id)
+            attachedDocumentKeys.insert(attachmentKey)
+        } catch {
+            print("Detected document handling failed: \(error)")
+        }
+    }
+
+    @MainActor
+    private func maybePromptForAccessibilityAccess() {
+        guard !viewModel.accessibilityTrusted else { return }
+        guard !didPromptForAccessibility else { return }
+
+        didPromptForAccessibility = true
+        _ = viewModel.requestAccessibilityTrust(prompt: true)
+    }
+
+    private func makeAttachmentKey(projectID: String, documentURL: URL) -> String {
+        "\(projectID)|\(documentURL.standardizedFileURL.path)"
+    }
 }
 
 final class OverlayPanel: NSPanel {
@@ -239,5 +283,33 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
         newOrigin.x += deltaX
         newOrigin.y += deltaY
         window.setFrameOrigin(newOrigin)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let window = window, event.hasPreciseScrollingDeltas else {
+            super.scrollWheel(with: event)
+            return
+        }
+
+        // Treat a precise scroll gesture as a two-finger drag for repositioning the overlay.
+        guard event.momentumPhase.isEmpty else { return }
+        let deviceDirection: CGFloat = event.isDirectionInvertedFromDevice ? -1 : 1
+        let translationX = -event.scrollingDeltaX * deviceDirection
+        let translationY = event.scrollingDeltaY * deviceDirection
+
+        var newOrigin = window.frame.origin
+        newOrigin.x += translationX
+        newOrigin.y += translationY
+        window.setFrameOrigin(newOrigin)
+
+        keepCursorInsideOverlay(translationX: translationX, translationY: translationY)
+    }
+
+    private func keepCursorInsideOverlay(translationX: CGFloat, translationY: CGFloat) {
+        guard var location = CGEvent(source: nil)?.location else { return }
+        location.x += translationX
+        // Quartz display coordinates use an inverted Y axis compared with AppKit.
+        location.y -= translationY
+        CGWarpMouseCursorPosition(location)
     }
 }

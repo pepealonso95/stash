@@ -14,14 +14,54 @@ final class OverlayViewModel: ObservableObject {
     }
     @Published var lastDroppedFiles: [URL] = []
     @Published var selectedProject: OverlayProject?
+    @Published var detectedDocument: DetectedDocumentContext?
+    @Published var accessibilityTrusted = false
 
     let backendClient = BackendClient()
     var stateDidChange: (() -> Void)?
     var overlayTapped: (() -> Void)?
     var filesDropped: (([URL]) -> Void)?
+    private let documentDetector = DocumentContextDetector()
 
     var isEngaged: Bool {
         isHovered || isDragTarget || isActive
+    }
+
+    var overlayHelpText: String {
+        if let detectedDocument {
+            return "Detected \(detectedDocument.url.lastPathComponent) in \(detectedDocument.sourceAppName). Click to attach and chat."
+        }
+        if !accessibilityTrusted {
+            return "Enable Accessibility permission to auto-detect open documents."
+        }
+        return "Drop files or click to choose a project."
+    }
+
+    init() {
+        accessibilityTrusted = documentDetector.requestAccessibilityTrust(prompt: false)
+
+        documentDetector.onDetectedDocumentChange = { [weak self] detectedDocument in
+            guard let self else { return }
+            self.detectedDocument = detectedDocument
+            self.stateDidChange?()
+        }
+
+        documentDetector.onAccessibilityTrustChange = { [weak self] trusted in
+            guard let self else { return }
+            self.accessibilityTrusted = trusted
+            self.stateDidChange?()
+        }
+
+        documentDetector.start()
+    }
+
+    deinit {
+        documentDetector.stop()
+    }
+
+    @discardableResult
+    func requestAccessibilityTrust(prompt: Bool) -> Bool {
+        documentDetector.requestAccessibilityTrust(prompt: prompt)
     }
 
     func handleOverlayTap() {
@@ -54,9 +94,25 @@ struct OverlayRootView: View {
             VStack(spacing: 6) {
                 StashIconView(isAnimating: isAnimating)
             }
+
+            VStack {
+                HStack {
+                    Spacer()
+                    if viewModel.detectedDocument != nil {
+                        Image(systemName: "doc.text.fill")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .padding(6)
+                            .background(Circle().fill(Color.blue.opacity(0.95)))
+                    }
+                }
+                Spacer()
+            }
+            .padding(8)
         }
         .frame(width: 96, height: 96)
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .help(viewModel.overlayHelpText)
         .onHover { hover in
             viewModel.isHovered = hover
         }

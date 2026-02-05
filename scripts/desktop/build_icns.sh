@@ -25,8 +25,27 @@ mkdir -p "$ICONSET_DIR"
 rm -f "$ICONSET_DIR"/*.png
 
 # Build a square master image for deterministic downscaling.
-MASTER="$ICONSET_DIR/icon-master.png"
-sips --cropToHeightWidth 1024 1024 "$SOURCE_ICON" --out "$MASTER" >/dev/null
+# Preserve the full source artwork by fitting then padding to square.
+TMP_DIR="$(mktemp -d /tmp/stash-icon-build.XXXXXX)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+MASTER="$TMP_DIR/icon-master.png"
+PREPARED="$TMP_DIR/icon-prepared.png"
+SOURCE_WIDTH="$(sips -g pixelWidth "$SOURCE_ICON" | awk '/pixelWidth:/ {print $2}')"
+SOURCE_HEIGHT="$(sips -g pixelHeight "$SOURCE_ICON" | awk '/pixelHeight:/ {print $2}')"
+
+if [ -z "$SOURCE_WIDTH" ] || [ -z "$SOURCE_HEIGHT" ]; then
+  echo "Unable to read source icon dimensions: $SOURCE_ICON" >&2
+  exit 1
+fi
+
+if [ "$SOURCE_WIDTH" -ge "$SOURCE_HEIGHT" ]; then
+  sips --resampleWidth 1024 "$SOURCE_ICON" --out "$PREPARED" >/dev/null
+else
+  sips --resampleHeight 1024 "$SOURCE_ICON" --out "$PREPARED" >/dev/null
+fi
+
+sips --padToHeightWidth 1024 1024 "$PREPARED" --out "$MASTER" >/dev/null
 
 make_icon() {
   local size="$1"
