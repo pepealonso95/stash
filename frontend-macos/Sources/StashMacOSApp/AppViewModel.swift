@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 
 @MainActor
 final class AppViewModel: ObservableObject {
@@ -318,6 +319,15 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func handleFileDrop(providers: [NSItemProvider], toRelativeDirectory relativeDirectory: String?) -> Bool {
+        guard projectRootURL != nil else { return false }
+        let acceptsFiles = providers.contains { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        guard acceptsFiles else { return false }
+
+        Task { await processDroppedFiles(providers: providers, toRelativeDirectory: relativeDirectory) }
+        return true
+    }
+
     private struct PreparedProjectAccess {
         let url: URL
         let bookmarkData: Data?
@@ -415,6 +425,199 @@ final class AppViewModel: ObservableObject {
             defaults.set(bookmarkData, forKey: lastProjectBookmarkKey)
         } else {
             defaults.removeObject(forKey: lastProjectBookmarkKey)
+        }
+    }
+
+    private func processDroppedFiles(providers: [NSItemProvider], toRelativeDirectory relativeDirectory: String?) async {
+        guard let root = projectRootURL?.standardizedFileURL else { return }
+        let droppedURLs = await loadDroppedFileURLs(from: providers)
+        if droppedURLs.isEmpty {
+            errorText = "Could not read dropped items. Try dropping files from Finder again."
+            return
+        }
+
+        let targetDir = normalizedDropDirectory(relativeDirectory)
+        let destinationBase = targetDir.isEmpty ? root : root.appendingPathComponent(targetDir, isDirectory: true)
+        guard isInsideProject(destinationBase, root: root) else {
+            errorText = "Drop target is outside the active project folder."
+            return
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: destinationBase, withIntermediateDirectories: true)
+        } catch {
+            errorText = "Could not create destination folder: \(error.localizedDescription)"
+            return
+        }
+
+        var importedCount = 0
+        var movedCount = 0
+        var failures: [String] = []
+
+        for source in droppedURLs {
+            do {
+                let op = try transferDroppedItem(from: source, to: destinationBase, projectRoot: root)
+                if op == .moved {
+                    movedCount += 1
+                } else {
+                    importedCount += 1
+                }
+            } catch {
+                failures.append("\(source.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+
+        await refreshFiles(force: true, triggerChangeIndex: false)
+        await autoIndexCurrentProject(fullScan: false, statusText: "Files changed. Re-indexing...")
+
+        if !failures.isEmpty {
+            let sample = failures.prefix(2).joined(separator: " | ")
+            errorText = "Dropped \(importedCount + movedCount) item(s), \(failures.count) failed. \(sample)"
+            return
+        }
+
+        if movedCount > 0 && importedCount > 0 {
+            runStatusText = "Moved \(movedCount), imported \(importedCount)"
+        } else if movedCount > 0 {
+            runStatusText = "Moved \(movedCount) item(s)"
+        } else {
+            runStatusText = "Imported \(importedCount) item(s)"
+        }
+    }
+
+    private enum DropTransferOp {
+        case copied
+        case moved
+    }
+
+    private func transferDroppedItem(from sourceURL: URL, to destinationBase: URL, projectRoot: URL) throws -> DropTransferOp {
+        let fm = FileManager.default
+        let source = sourceURL.standardizedFileURL
+        let sourceAccess = source.startAccessingSecurityScopedResource()
+        defer {
+            if sourceAccess {
+                source.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        guard fm.fileExists(atPath: source.path) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+
+        let desiredDestination = destinationBase.appendingPathComponent(source.lastPathComponent)
+        let destination = uniqueDestinationURL(for: desiredDestination)
+
+        guard isInsideProject(destination, root: projectRoot) else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+
+        let sourceInsideProject = isInsideProject(source, root: projectRoot)
+        if sourceInsideProject {
+            if source.standardizedFileURL == destination.standardizedFileURL {
+                return .moved
+            }
+
+            if isDescendant(destination, of: source) {
+                throw NSError(
+                    domain: NSCocoaErrorDomain,
+                    code: NSFeatureUnsupportedError,
+                    userInfo: [NSLocalizedDescriptionKey: "Cannot move a folder into itself."]
+                )
+            }
+            try fm.moveItem(at: source, to: destination)
+            return .moved
+        }
+
+        try fm.copyItem(at: source, to: destination)
+        return .copied
+    }
+
+    private func uniqueDestinationURL(for requested: URL) -> URL {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: requested.path) {
+            return requested
+        }
+
+        let ext = requested.pathExtension
+        let stem = requested.deletingPathExtension().lastPathComponent
+        let parent = requested.deletingLastPathComponent()
+
+        for index in 1 ... 999 {
+            let candidateName: String
+            if ext.isEmpty {
+                candidateName = "\(stem)-\(index)"
+            } else {
+                candidateName = "\(stem)-\(index).\(ext)"
+            }
+            let candidate = parent.appendingPathComponent(candidateName)
+            if !fm.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+
+        return parent.appendingPathComponent(UUID().uuidString + (ext.isEmpty ? "" : ".\(ext)"))
+    }
+
+    private func normalizedDropDirectory(_ relativeDirectory: String?) -> String {
+        guard let relativeDirectory else { return "" }
+        let trimmed = relativeDirectory.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if trimmed == "." {
+            return ""
+        }
+        return trimmed
+    }
+
+    private func isInsideProject(_ candidate: URL, root: URL) -> Bool {
+        let candidatePath = candidate.standardizedFileURL.path
+        let rootPath = root.standardizedFileURL.path
+        return candidatePath == rootPath || candidatePath.hasPrefix(rootPath + "/")
+    }
+
+    private func isDescendant(_ candidate: URL, of ancestor: URL) -> Bool {
+        let candidatePath = candidate.standardizedFileURL.path
+        let ancestorPath = ancestor.standardizedFileURL.path
+        return candidatePath == ancestorPath || candidatePath.hasPrefix(ancestorPath + "/")
+    }
+
+    private func loadDroppedFileURLs(from providers: [NSItemProvider]) async -> [URL] {
+        var urls: [URL] = []
+        for provider in providers {
+            guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else { continue }
+            if let url = await loadSingleDroppedFileURL(from: provider) {
+                urls.append(url.standardizedFileURL)
+            }
+        }
+        var uniqueByPath: [String: URL] = [:]
+        for url in urls {
+            uniqueByPath[url.path] = url
+        }
+        return uniqueByPath.values.sorted { $0.path < $1.path }
+    }
+
+    private func loadSingleDroppedFileURL(from provider: NSItemProvider) async -> URL? {
+        await withCheckedContinuation { continuation in
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _error in
+                if let data = item as? Data,
+                   let url = NSURL(absoluteURLWithDataRepresentation: data, relativeTo: nil) as URL?
+                {
+                    continuation.resume(returning: url)
+                    return
+                }
+
+                if let url = item as? URL {
+                    continuation.resume(returning: url)
+                    return
+                }
+
+                if let string = item as? String,
+                   let url = URL(string: string)
+                {
+                    continuation.resume(returning: url)
+                    return
+                }
+
+                continuation.resume(returning: nil)
+            }
         }
     }
 

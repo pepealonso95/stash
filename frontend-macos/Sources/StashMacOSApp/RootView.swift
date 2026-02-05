@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct RootView: View {
     @StateObject private var viewModel = AppViewModel()
@@ -176,6 +177,8 @@ private struct EmptyProjectView: View {
 
 private struct FilesPanel: View {
     @ObservedObject var viewModel: AppViewModel
+    @State private var rootDropIsTargeted = false
+    @State private var rowDropTargetID: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -187,6 +190,7 @@ private struct FilesPanel: View {
                 .textFieldStyle(.roundedBorder)
 
             List(viewModel.filteredFiles) { item in
+                let targetDirectory = dropTargetDirectory(for: item)
                 HStack(spacing: 8) {
                     Image(systemName: item.isDirectory ? "folder.fill" : "doc.text")
                         .foregroundStyle(item.isDirectory ? CodexTheme.accent : CodexTheme.textSecondary)
@@ -197,10 +201,63 @@ private struct FilesPanel: View {
                     Spacer()
                 }
                 .help(item.relativePath)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(rowDropTargetID == item.id ? CodexTheme.accent.opacity(0.16) : Color.clear)
+                )
+                .onDrop(
+                    of: [UTType.fileURL],
+                    isTargeted: Binding(
+                        get: { rowDropTargetID == item.id },
+                        set: { targeted in
+                            if targeted {
+                                rowDropTargetID = item.id
+                            } else if rowDropTargetID == item.id {
+                                rowDropTargetID = nil
+                            }
+                        }
+                    )
+                ) { providers in
+                    viewModel.handleFileDrop(providers: providers, toRelativeDirectory: targetDirectory)
+                }
             }
             .listStyle(.inset)
+            .onDrop(of: [UTType.fileURL], isTargeted: $rootDropIsTargeted) { providers in
+                viewModel.handleFileDrop(providers: providers, toRelativeDirectory: nil)
+            }
+            .overlay(alignment: .bottomLeading) {
+                if rootDropIsTargeted {
+                    HStack(spacing: 6) {
+                        Image(systemName: "tray.and.arrow.down.fill")
+                        Text("Drop to import into project root")
+                    }
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(CodexTheme.accent)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(Color.white.opacity(0.95))
+                    )
+                    .overlay(
+                        Capsule().stroke(CodexTheme.accent.opacity(0.5), lineWidth: 1)
+                    )
+                    .padding(8)
+                }
+            }
         }
         .padding(14)
+    }
+
+    private func dropTargetDirectory(for item: FileItem) -> String {
+        if item.isDirectory {
+            return item.relativePath
+        }
+        let parts = item.relativePath.split(separator: "/")
+        if parts.count <= 1 {
+            return ""
+        }
+        return parts.dropLast().joined(separator: "/")
     }
 }
 
@@ -311,11 +368,16 @@ private struct ChatPanel: View {
                     Text(viewModel.runInProgress ? "Running..." : "Ready")
                         .font(.system(size: 11, weight: .medium, design: .rounded))
                         .foregroundStyle(viewModel.runInProgress ? CodexTheme.accent : CodexTheme.textSecondary)
+                    Text("⌘↩ Send")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(CodexTheme.textSecondary)
                     Spacer()
-                    Button("Run") {
+                    Button("Send") {
                         Task { await viewModel.sendComposerMessage() }
                     }
                     .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.return, modifiers: [.command])
+                    .help("Send message (⌘↩)")
                     .disabled(viewModel.isSending || viewModel.project == nil || !viewModel.aiSetupReady)
                 }
             }
