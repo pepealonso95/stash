@@ -59,7 +59,7 @@ def codex_integration_status(runtime: RuntimeConfig) -> dict[str, Any]:
         "codex_bin_resolved": resolved,
         "codex_available": resolved is not None,
         "planner_cmd_configured": bool(runtime.planner_cmd),
-        "codex_planner_model": runtime.codex_planner_model,
+        "codex_planner_model": runtime.codex_planner_model or "",
         "openai_api_key_set": openai_api_key_set,
         "openai_planner_configured": openai_api_key_set and bool(runtime.openai_model),
         "openai_model": runtime.openai_model,
