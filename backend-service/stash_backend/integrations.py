@@ -88,8 +88,8 @@ def codex_integration_status(runtime: RuntimeConfig) -> dict[str, Any]:
             )
             raw = ((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")).strip()
             status["login_checked"] = True
-            status["login_ok"] = proc.returncode == 0 and bool(raw)
-            status["detail"] = raw[:1000]
+            status["login_ok"] = proc.returncode == 0
+            status["detail"] = (raw[:1000] if raw else "Codex login check executed.")
             status["login_exit_code"] = int(proc.returncode)
         except Exception as exc:
             status["login_checked"] = True

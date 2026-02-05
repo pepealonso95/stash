@@ -333,7 +333,12 @@ private struct ChatPanel: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                MessageTimeline(messages: viewModel.visibleMessages)
+                MessageTimeline(
+                    messages: viewModel.visibleMessages,
+                    onOpenTaggedFile: { path in
+                        viewModel.openTaggedOutputPathInOS(path)
+                    }
+                )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
@@ -696,9 +701,21 @@ private struct RuntimeSetupSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Planner: Codex CLI (latest model)")
+                Text("Planner: Codex CLI")
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(CodexTheme.textPrimary)
+
+                Picker("Model", selection: $viewModel.setupCodexPlannerModel) {
+                    ForEach(viewModel.codexModelPresets) { preset in
+                        Text("\(preset.label) • \(preset.hint)")
+                            .tag(preset.value)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Text("Choose a faster model for lower latency, or keep Default for best compatibility.")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(CodexTheme.textSecondary)
 
                 if let resolved = viewModel.setupStatus?.codexBinResolved, !resolved.isEmpty {
                     Text("Codex binary: \(resolved)")
@@ -883,13 +900,14 @@ private struct MentionSuggestionsList: View {
 
 private struct MessageTimeline: View {
     let messages: [Message]
+    let onOpenTaggedFile: (String) -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(messages) { message in
-                        MessageRow(message: message)
+                        MessageRow(message: message, onOpenTaggedFile: onOpenTaggedFile)
                             .id(message.id)
                     }
                 }
@@ -908,6 +926,7 @@ private struct MessageTimeline: View {
 
 private struct MessageRow: View {
     let message: Message
+    let onOpenTaggedFile: (String) -> Void
 
     private var isUser: Bool {
         message.role.lowercased() == "user"
@@ -921,18 +940,28 @@ private struct MessageRow: View {
         let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isUser else { return content }
 
-        if let summaryRange = content.range(of: "Execution summary:") {
-            let summary = String(content[summaryRange.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !summary.isEmpty {
-                return summary
-            }
-        }
-
-        let sanitized = stripCodexCommandBlocks(from: content)
+        let noFileTags = stripStashFileTags(from: content)
+        let sanitized = stripCodexCommandBlocks(from: noFileTags)
         if !sanitized.isEmpty {
+            if let summaryRange = sanitized.range(of: "Execution summary:") {
+                let beforeSummary = String(sanitized[..<summaryRange.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !beforeSummary.isEmpty {
+                    return sanitized
+                }
+                let summary = String(sanitized[summaryRange.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !summary.isEmpty {
+                    return summary
+                }
+            }
             return sanitized
         }
         return content
+    }
+
+    private var taggedOutputFiles: [String] {
+        guard !isUser else { return [] }
+        return extractStashFileTags(from: message.content)
     }
 
     var body: some View {
@@ -954,6 +983,45 @@ private struct MessageRow: View {
                     .foregroundStyle(CodexTheme.textPrimary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+
+                if !taggedOutputFiles.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Output Files")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .foregroundStyle(CodexTheme.textSecondary)
+                        ForEach(taggedOutputFiles, id: \.self) { path in
+                            Button {
+                                onOpenTaggedFile(path)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "doc.text")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(CodexTheme.accent)
+                                    Text(path)
+                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(CodexTheme.textPrimary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text("Open")
+                                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(CodexTheme.accent)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .fill(CodexTheme.canvas.opacity(0.95))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.top, 2)
+                }
             }
             .padding(12)
             .background(
@@ -973,6 +1041,42 @@ private struct MessageRow: View {
     private func stripCodexCommandBlocks(from text: String) -> String {
         guard let regex = try? NSRegularExpression(
             pattern: "<codex_cmd(?:\\s+[^>]*)?>[\\s\\S]*?<\\/codex_cmd>",
+            options: [.caseInsensitive]
+        ) else {
+            return text
+        }
+        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
+        let stripped = regex.stringByReplacingMatches(in: text, options: [], range: nsRange, withTemplate: "")
+        return stripped
+            .replacingOccurrences(of: "\n\n\n", with: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func extractStashFileTags(from text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: "<stash_file>\\s*([^<]+?)\\s*<\\/stash_file>",
+            options: [.caseInsensitive]
+        ) else {
+            return []
+        }
+        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
+        let matches = regex.matches(in: text, options: [], range: nsRange)
+        var paths: [String] = []
+        var seen = Set<String>()
+        for match in matches where match.numberOfRanges > 1 {
+            guard let range = Range(match.range(at: 1), in: text) else { continue }
+            let value = String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowered = value.lowercased()
+            if value.isEmpty || seen.contains(lowered) { continue }
+            seen.insert(lowered)
+            paths.append(value)
+        }
+        return paths
+    }
+
+    private func stripStashFileTags(from text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: "(?im)^\\s*[-*]?\\s*<stash_file>\\s*[^<]+?\\s*<\\/stash_file>\\s*$",
             options: [.caseInsensitive]
         ) else {
             return text

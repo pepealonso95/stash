@@ -17,6 +17,7 @@ from .utils import ensure_inside, stable_slug, utc_now_iso
 
 TAG_RE = re.compile(r"<codex_cmd>(.*?)</codex_cmd>", flags=re.DOTALL | re.IGNORECASE)
 logger = logging.getLogger(__name__)
+CODEX_EXEC_REASONING_EFFORT = "low"
 
 ALLOWED_PREFIXES = {
     "ls",
@@ -114,12 +115,12 @@ class CodexExecutor:
             if raw.is_absolute():
                 target = raw.resolve()
             else:
-                target = (worktree_path / raw).resolve()
+                # Relative cwd is project-root relative so planner output like "." maps to user files.
+                target = (context.root_path / raw).resolve()
         else:
-            target = worktree_path.resolve()
+            target = context.root_path.resolve()
 
         if ensure_inside(context.root_path, target) or ensure_inside(worktree_path, target):
-            target.mkdir(parents=True, exist_ok=True)
             return target
 
         raise CodexCommandError("Resolved cwd escapes project root/worktree boundary")
@@ -219,6 +220,8 @@ class CodexExecutor:
             "workspace-write",
             "-C",
             str(cwd),
+            "-c",
+            f'reasoning.effort="{CODEX_EXEC_REASONING_EFFORT}"',
         ]
         if codex_model:
             cmdline.extend(["-m", codex_model])
@@ -284,6 +287,13 @@ class CodexExecutor:
         exec_env = dict(os.environ)
         exec_env["UV_CACHE_DIR"] = str(uv_cache_dir)
         exec_env.setdefault("XDG_CACHE_HOME", str(runtime_cache_dir))
+        venv_scripts = sysconfig.get_path("scripts")
+        if venv_scripts:
+            existing_path = exec_env.get("PATH", "")
+            if existing_path:
+                exec_env["PATH"] = f"{venv_scripts}{os.pathsep}{existing_path}"
+            else:
+                exec_env["PATH"] = venv_scripts
         venv_purelib = sysconfig.get_paths().get("purelib")
         if venv_purelib:
             existing_pythonpath = exec_env.get("PYTHONPATH", "")

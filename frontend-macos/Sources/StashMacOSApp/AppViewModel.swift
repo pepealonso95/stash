@@ -4,6 +4,16 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class AppViewModel: ObservableObject {
+    struct CodexModelPreset: Identifiable, Hashable {
+        let value: String
+        let label: String
+        let hint: String
+
+        var id: String {
+            value.isEmpty ? "__default__" : value
+        }
+    }
+
     @Published var backendConnected = false
     @Published var backendStatusText = "Backend offline"
 
@@ -35,7 +45,7 @@ final class AppViewModel: ObservableObject {
     @Published var setupPlannerBackend = "auto"
     @Published var setupCodexMode = "cli"
     @Published var setupCodexBin = "codex"
-    @Published var setupCodexPlannerModel = "gpt-5"
+    @Published var setupCodexPlannerModel = ""
     @Published var setupPlannerCmd = ""
     @Published var setupPlannerTimeoutSeconds = "150"
     @Published var setupOpenAIAPIKey = ""
@@ -74,6 +84,12 @@ final class AppViewModel: ObservableObject {
     private var activeRunID: String?
     private var lastRunEventID = 0
     private var client: BackendClient
+    private let baseCodexModelPresets: [CodexModelPreset] = [
+        CodexModelPreset(value: "", label: "Default (latest)", hint: "Best compatibility"),
+        CodexModelPreset(value: "gpt-5", label: "gpt-5", hint: "Higher quality"),
+        CodexModelPreset(value: "gpt-5-mini", label: "gpt-5-mini", hint: "Faster"),
+        CodexModelPreset(value: "gpt-5-nano", label: "gpt-5-nano", hint: "Fastest"),
+    ]
 
     init(initialProjectRootURL: URL? = nil) {
         self.initialProjectRootURL = initialProjectRootURL
@@ -124,6 +140,15 @@ final class AppViewModel: ObservableObject {
             let role = $0.role.lowercased()
             return role == "user" || role == "assistant"
         }
+    }
+
+    var codexModelPresets: [CodexModelPreset] {
+        var presets = baseCodexModelPresets
+        let current = setupCodexPlannerModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !current.isEmpty, !presets.contains(where: { $0.value.caseInsensitiveCompare(current) == .orderedSame }) {
+            presets.append(CodexModelPreset(value: current, label: "Custom: \(current)", hint: "Persisted custom value"))
+        }
+        return presets
     }
 
     func composerDidChange() {
@@ -256,13 +281,14 @@ final class AppViewModel: ObservableObject {
         defer { setupSaving = false }
 
         let openAIKeyTrimmed = setupOpenAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let codexModelTrimmed = setupCodexPlannerModel.trimmingCharacters(in: .whitespacesAndNewlines)
 
         do {
             _ = try await client.updateRuntimeConfig(
                 plannerBackend: "auto",
                 codexMode: "cli",
                 codexBin: setupCodexBin.isEmpty ? "codex" : setupCodexBin,
-                codexPlannerModel: "",
+                codexPlannerModel: codexModelTrimmed,
                 plannerCmd: nil,
                 clearPlannerCmd: true,
                 plannerTimeoutSeconds: 150,
@@ -378,6 +404,37 @@ final class AppViewModel: ObservableObject {
 
         if !NSWorkspace.shared.open(itemURL) {
             errorText = "Could not open in macOS: \(item.relativePath)"
+        }
+    }
+
+    func openTaggedOutputPathInOS(_ rawPath: String) {
+        guard let projectRootURL else {
+            errorText = "Open a project folder first."
+            return
+        }
+
+        let cleaned = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+
+        let expanded = NSString(string: cleaned).expandingTildeInPath
+        let root = projectRootURL.standardizedFileURL
+        let targetURL: URL
+        if expanded.hasPrefix("/") {
+            targetURL = URL(fileURLWithPath: expanded).standardizedFileURL
+        } else {
+            targetURL = root.appendingPathComponent(cleaned).standardizedFileURL
+        }
+
+        guard isInsideProject(targetURL, root: root) else {
+            errorText = "Blocked opening path outside project: \(cleaned)"
+            return
+        }
+        guard FileManager.default.fileExists(atPath: targetURL.path) else {
+            errorText = "Output file not found: \(cleaned)"
+            return
+        }
+        if !NSWorkspace.shared.open(targetURL) {
+            errorText = "Could not open output file: \(cleaned)"
         }
     }
 

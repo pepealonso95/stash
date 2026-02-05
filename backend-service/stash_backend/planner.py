@@ -15,12 +15,15 @@ from .integrations import is_codex_model_config_error, resolve_binary
 from .runtime_config import RuntimeConfig, RuntimeConfigStore
 from .types import PlanResult
 
-MAX_HISTORY_ITEMS = 20
-MAX_HISTORY_CONTENT_CHARS = 1200
-MAX_SKILLS_CHARS = 12000
+MAX_HISTORY_ITEMS = 10
+MAX_HISTORY_CONTENT_CHARS = 500
+MAX_SKILLS_CHARS = 7000
 RETRY_HISTORY_ITEMS = 6
 RETRY_HISTORY_CONTENT_CHARS = 300
 RETRY_SKILLS_CHARS = 2500
+CODEX_PLANNER_REASONING_EFFORT = "medium"
+CODEX_SYNTHESIS_REASONING_EFFORT = "low"
+MAX_SYNTHESIS_TIMEOUT_SECONDS = 20
 
 ACTION_KEYWORDS = (
     "create",
@@ -52,6 +55,7 @@ READ_HINT_KEYWORDS = (
 
 FILE_REF_RE = re.compile(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,12}")
 CODEX_CMD_BLOCK_RE = re.compile(r"<codex_cmd(?:\s+[^>]*)?>[\s\S]*?</codex_cmd>", flags=re.IGNORECASE)
+STASH_FILE_TAG_RE = re.compile(r"<stash_file>\s*([^<]+?)\s*</stash_file>", flags=re.IGNORECASE)
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +154,363 @@ class Planner:
         stripped = re.sub(r"\n{3,}", "\n\n", stripped)
         return stripped.strip()
 
+    def sanitize_assistant_text(self, text: str) -> str:
+        return self._strip_codex_cmd_blocks(text).strip()
+
+    def _extract_stash_file_tags(self, text: str) -> list[str]:
+        tags: list[str] = []
+        seen: set[str] = set()
+        for match in STASH_FILE_TAG_RE.finditer(text):
+            candidate = match.group(1).strip()
+            lowered = candidate.lower()
+            if not candidate or lowered in seen:
+                continue
+            seen.add(lowered)
+            tags.append(candidate)
+        return tags
+
+    def _append_output_file_tags(self, text: str, output_files: list[str]) -> str:
+        if not output_files:
+            return text.strip()
+
+        known = set(path.lower() for path in self._extract_stash_file_tags(text))
+        missing = [path for path in output_files if path.lower() not in known]
+        if not missing:
+            return text.strip()
+
+        suffix = "Output files:\n" + "\n".join(f"- <stash_file>{path}</stash_file>" for path in missing[:10])
+        base = text.strip()
+        if base:
+            return f"{base}\n\n{suffix}"
+        return suffix
+
+    def _extract_requested_paths(self, user_message: str) -> list[str]:
+        paths: list[str] = []
+        seen: set[str] = set()
+        for match in FILE_REF_RE.findall(user_message):
+            cleaned = match.strip().strip("`\"'").lstrip("@")
+            lowered = cleaned.lower()
+            if not cleaned or lowered in seen:
+                continue
+            seen.add(lowered)
+            paths.append(cleaned)
+        return paths
+
+    def _pick_output_candidate(
+        self,
+        *,
+        user_message: str,
+        tool_results: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        requested_paths = [path.lower() for path in self._extract_requested_paths(user_message)]
+        best: tuple[int, int, dict[str, Any]] | None = None
+
+        for item in tool_results:
+            exit_code = int(item.get("exit_code") or 0)
+            if exit_code != 0:
+                continue
+            stdout = str(item.get("stdout", "")).strip()
+            if not stdout:
+                continue
+
+            cmd = str(item.get("cmd", ""))
+            cmd_lower = cmd.lower()
+            step_index = int(item.get("step_index") or 0)
+
+            score = 0
+            if requested_paths and any(path in cmd_lower for path in requested_paths):
+                score += 100
+            elif requested_paths:
+                stdout_head = stdout[:800].lower()
+                if any(path in stdout_head for path in requested_paths):
+                    score += 50
+
+            if any(token in cmd_lower for token in ("cat ", "sed ", "rg ", "grep ", "python", "python3")):
+                score += 20
+
+            if len(stdout) > 80:
+                score += 10
+
+            if best is None or (score, step_index) >= (best[0], best[1]):
+                best = (score, step_index, item)
+
+        return best[2] if best else None
+
+    def _naive_bullet_summary(self, text: str, *, max_bullets: int = 5) -> str:
+        normalized = text.replace("\r\n", "\n").strip()
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", normalized) if s.strip()]
+        bullets: list[str] = []
+        seen: set[str] = set()
+
+        for sentence in sentences:
+            compact = re.sub(r"\s+", " ", sentence)
+            if len(compact) < 30:
+                continue
+            key = compact.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            bullets.append(f"- {compact[:220]}")
+            if len(bullets) >= max_bullets:
+                break
+
+        if bullets:
+            return "\n".join(bullets)
+
+        preview_lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+        if not preview_lines:
+            return "- No readable content was produced."
+
+        fallback = " ".join(preview_lines[:3])
+        fallback = re.sub(r"\s+", " ", fallback)
+        return f"- {fallback[:260]}"
+
+    def _local_tool_response_fallback(self, *, user_message: str, tool_results: list[dict[str, Any]]) -> str | None:
+        if not tool_results:
+            return None
+
+        failures = [item for item in tool_results if int(item.get("exit_code") or 0) != 0]
+        selected = self._pick_output_candidate(user_message=user_message, tool_results=tool_results)
+
+        if not selected:
+            if failures:
+                first_failure = failures[0]
+                failure_detail = str(first_failure.get("stderr") or "").strip() or "Command failed without stderr output."
+                return (
+                    "I ran the commands but could not produce readable output.\n"
+                    f"Failure: {failure_detail[:500]}"
+                )
+            return None
+
+        stdout = str(selected.get("stdout") or "").strip()
+        if not stdout:
+            return None
+
+        request_lower = user_message.lower()
+        needs_summary = any(keyword in request_lower for keyword in ("summary", "summarize", "summarise"))
+        asks_for_contents = any(
+            keyword in request_lower
+            for keyword in ("what is in", "what's in", "tell me", "read", "show", "contents")
+        )
+
+        if needs_summary:
+            return "Summary based on the extracted output:\n" + self._naive_bullet_summary(stdout)
+
+        preview = stdout[:4000]
+        if asks_for_contents:
+            if len(stdout) > len(preview):
+                preview += "\n\n... (truncated)"
+            return "Here is what I found:\n\n" + preview
+
+        return "Execution completed. Relevant output:\n\n" + preview
+
+    def _build_response_prompt(
+        self,
+        *,
+        user_message: str,
+        planner_text: str,
+        tool_results: list[dict[str, Any]],
+        output_files: list[str],
+    ) -> str:
+        trimmed_results: list[dict[str, Any]] = []
+        for item in tool_results[-8:]:
+            trimmed_results.append(
+                {
+                    "step_index": item.get("step_index"),
+                    "status": item.get("status"),
+                    "exit_code": item.get("exit_code"),
+                    "cmd": str(item.get("cmd", ""))[:280],
+                    "stdout": str(item.get("stdout", ""))[:2600],
+                    "stderr": str(item.get("stderr", ""))[:900],
+                }
+            )
+
+        return (
+            "You are Stash assistant.\n"
+            "Write the final answer to the user based on completed local command results.\n"
+            "Do not include <codex_cmd> blocks.\n"
+            "Do not include raw execution audit headers like 'Execution summary'.\n"
+            "If results contain file content, summarize it directly for the user.\n"
+            "If a step failed, mention the failure and what to do next.\n"
+            "If the run produced output files, include each one as `<stash_file>relative/path.ext</stash_file>`.\n"
+            "Keep the response concise but useful.\n\n"
+            f"Original user request:\n{user_message}\n\n"
+            f"Planner draft text:\n{self._strip_codex_cmd_blocks(planner_text)[:2400]}\n\n"
+            f"Detected output files:\n{json.dumps(output_files[:10], ensure_ascii=True)}\n\n"
+            f"Command result JSON:\n{json.dumps(trimmed_results, ensure_ascii=True)}\n"
+        )
+
+    def _run_openai_text_prompt(self, *, prompt: str, runtime: RuntimeConfig) -> str | None:
+        if not self._openai_available(runtime=runtime):
+            return None
+
+        payload = {"model": runtime.openai_model, "input": prompt}
+        body = json.dumps(payload).encode("utf-8")
+        url = f"{runtime.openai_base_url.rstrip('/')}/responses"
+        headers = {
+            "Authorization": f"Bearer {runtime.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        req = request.Request(url, data=body, headers=headers, method="POST")
+
+        try:
+            with request.urlopen(req, timeout=runtime.openai_timeout_seconds) as response:
+                response_text = response.read().decode("utf-8", errors="replace")
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            logger.warning("OpenAI response synthesis failed status=%s detail=%s", exc.code, detail[:500])
+            return None
+        except Exception:
+            logger.exception("OpenAI response synthesis failed")
+            return None
+
+        try:
+            response_json = json.loads(response_text)
+        except json.JSONDecodeError:
+            logger.warning("OpenAI response synthesis returned non-JSON payload")
+            return None
+
+        text = self._extract_openai_output_text(response_json)
+        if not text:
+            return None
+        return text.strip()
+
+    def _run_codex_text_prompt(
+        self,
+        *,
+        prompt: str,
+        runtime: RuntimeConfig,
+        project_summary: dict[str, Any],
+        timeout_seconds: int,
+        attempt_label: str,
+    ) -> str | None:
+        if not self._codex_available(runtime=runtime):
+            return None
+
+        planning_cwd = str(project_summary.get("root_path") or ".")
+        resolved_codex = resolve_binary(runtime.codex_bin)
+        if not resolved_codex:
+            return None
+
+        base_cmdline = [
+            resolved_codex,
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "-s",
+            "read-only",
+            "-C",
+            planning_cwd,
+            "-c",
+            f'reasoning.effort="{CODEX_PLANNER_REASONING_EFFORT}"',
+        ]
+        cmdline = list(base_cmdline)
+        if runtime.codex_planner_model:
+            cmdline.extend(["-m", runtime.codex_planner_model])
+        cmdline.extend(["-c", f'reasoning.effort="{CODEX_SYNTHESIS_REASONING_EFFORT}"'])
+        cmdline.append("-")
+
+        try:
+            proc = subprocess.run(
+                cmdline,
+                input=prompt,
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except Exception:
+            logger.exception("Codex response synthesis subprocess failed")
+            return None
+
+        if proc.returncode != 0:
+            stderr_preview = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()[:1200]
+            logger.warning(
+                "Codex response synthesis failed exit_code=%s attempt=%s stderr=%r",
+                proc.returncode,
+                attempt_label,
+                stderr_preview,
+            )
+            if runtime.codex_planner_model and is_codex_model_config_error(stderr_preview):
+                if self.runtime_config_store is not None:
+                    try:
+                        self.runtime_config_store.update(codex_planner_model="")
+                    except Exception:
+                        logger.exception("Could not persist codex planner model reset after synthesis failure")
+                try:
+                    proc = subprocess.run(
+                        [*base_cmdline, "-"],
+                        input=prompt,
+                        text=True,
+                        capture_output=True,
+                        timeout=timeout_seconds,
+                        check=False,
+                    )
+                except Exception:
+                    logger.exception("Codex response synthesis retry subprocess failed")
+                    return None
+                if proc.returncode != 0:
+                    return None
+            else:
+                return None
+
+        message = self._extract_agent_message_from_jsonl(proc.stdout or "")
+        if message:
+            return message.strip()
+        output = (proc.stdout or "").strip()
+        return output or None
+
+    def synthesize_response(
+        self,
+        *,
+        user_message: str,
+        planner_text: str,
+        project_summary: dict[str, Any],
+        tool_results: list[dict[str, Any]],
+        output_files: list[str] | None = None,
+    ) -> str | None:
+        if not tool_results:
+            return None
+
+        runtime = self._runtime_config()
+        normalized_output_files = [path.strip() for path in (output_files or []) if path.strip()]
+        prompt = self._build_response_prompt(
+            user_message=user_message,
+            planner_text=planner_text,
+            tool_results=tool_results,
+            output_files=normalized_output_files,
+        )
+
+        backend_order = ["codex", "openai"]
+        if runtime.planner_backend == "openai_api":
+            backend_order = ["openai", "codex"]
+
+        for backend in backend_order:
+            text: str | None
+            if backend == "openai":
+                text = self._run_openai_text_prompt(prompt=prompt, runtime=runtime)
+            else:
+                text = self._run_codex_text_prompt(
+                    prompt=prompt,
+                    runtime=runtime,
+                    project_summary=project_summary,
+                    timeout_seconds=min(MAX_SYNTHESIS_TIMEOUT_SECONDS, runtime.planner_timeout_seconds),
+                    attempt_label=backend,
+                )
+
+            if not text:
+                continue
+            cleaned = self.sanitize_assistant_text(text)
+            if cleaned:
+                return self._append_output_file_tags(cleaned, normalized_output_files)
+
+        fallback = self._local_tool_response_fallback(user_message=user_message, tool_results=tool_results)
+        if fallback:
+            cleaned_fallback = self.sanitize_assistant_text(fallback)
+            return self._append_output_file_tags(cleaned_fallback, normalized_output_files)
+
+        return None
+
     def _build_planner_prompt(
         self,
         *,
@@ -199,6 +560,8 @@ class Planner:
             "- Never use sudo, rm -rf, git reset --hard, or destructive commands.\n"
             f"- For changes intended to affect project files, set cwd to this exact project root path: {project_root}.\n"
             "- Keep commands inside the project/worktree context.\n"
+            "- If the user asks for a deliverable (summary/report/new version/document/spreadsheet), generate a real output file in the project folder (for example: .txt, .md, .csv, .xlsx, .docx when appropriate).\n"
+            "- In the assistant text, include every produced deliverable file as `<stash_file>relative/path.ext</stash_file>`.\n"
             f"{final_rule}\n\n"
             f"Project summary JSON:\n{json.dumps(project_summary, ensure_ascii=True)}\n\n"
             f"Recent conversation JSON:\n{json.dumps(normalized_history, ensure_ascii=True)}\n\n"

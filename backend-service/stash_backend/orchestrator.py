@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from pathlib import Path
 from typing import Any
 
 from .codex import CodexCommandError, CodexExecutor
@@ -10,8 +12,20 @@ from .indexer import IndexingService
 from .planner import Planner
 from .project_store import ProjectStore
 from .skills import load_skill_bundle
+from .utils import ensure_inside
 
 logger = logging.getLogger(__name__)
+FILE_TOKEN_RE = re.compile(
+    r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:txt|md|markdown|csv|tsv|json|ya?ml|xml|html|rtf|docx|xlsx|pdf|log)",
+    flags=re.IGNORECASE,
+)
+REDIRECT_TOKEN_RE = re.compile(r"(?:^|\s)(?:>|>>|1>|2>)\s*(['\"]?)([^\s'\"`]+)\1")
+OUTPUT_FLAG_TOKEN_RE = re.compile(r"(?:--output|--out|--file|-o)\s+(['\"]?)([^\s'\"`]+)\1", flags=re.IGNORECASE)
+OUTPUT_HINT_RE = re.compile(
+    r"(?:output|saved(?:\s+to|\s+as)?|written(?:\s+to)?|created)\s*[:=]?\s*(['\"]?)([^\s'\"`]+)\1",
+    flags=re.IGNORECASE,
+)
+STASH_FILE_TAG_TEMPLATE = "<stash_file>{path}</stash_file>"
 
 
 class RunOrchestrator:
@@ -75,12 +89,146 @@ class RunOrchestrator:
 
         return "\n\n".join(section for section in sections if section).strip()
 
+    def _resolve_command_base_cwd(self, *, context: Any, command_cwd: str | None) -> Path:
+        if command_cwd:
+            raw = Path(command_cwd).expanduser()
+            if raw.is_absolute():
+                candidate = raw.resolve()
+            else:
+                candidate = (context.root_path / raw).resolve()
+            if ensure_inside(context.root_path, candidate):
+                return candidate
+        return context.root_path.resolve()
+
+    def _extract_command_path_tokens(self, command_text: str) -> set[str]:
+        tokens: set[str] = set()
+        for match in FILE_TOKEN_RE.finditer(command_text):
+            tokens.add(match.group(0))
+        for match in REDIRECT_TOKEN_RE.finditer(command_text):
+            tokens.add(match.group(2))
+        for match in OUTPUT_FLAG_TOKEN_RE.finditer(command_text):
+            tokens.add(match.group(2))
+        return tokens
+
+    def _extract_runtime_path_tokens(self, text: str) -> set[str]:
+        tokens: set[str] = set()
+        snippet = text[:6000]
+        for match in OUTPUT_HINT_RE.finditer(snippet):
+            tokens.add(match.group(2))
+        for match in FILE_TOKEN_RE.finditer(snippet):
+            start = max(0, match.start() - 24)
+            end = min(len(snippet), match.end() + 24)
+            window = snippet[start:end].lower()
+            if any(marker in window for marker in ("output", "saved", "written", "created")):
+                tokens.add(match.group(0))
+        return tokens
+
+    def _resolve_candidate_path(self, *, context: Any, cwd: Path, token: str) -> Path | None:
+        cleaned = token.strip().strip("`'\"").rstrip(".,:;)")
+        if not cleaned or "://" in cleaned:
+            return None
+        if cleaned.startswith("-") or "@" in cleaned:
+            return None
+
+        raw = Path(cleaned).expanduser()
+        candidate = raw.resolve() if raw.is_absolute() else (cwd / raw).resolve()
+        root = context.root_path.resolve()
+        stash_dir = context.stash_dir.resolve()
+
+        if not ensure_inside(root, candidate):
+            return None
+        if candidate == stash_dir or ensure_inside(stash_dir, candidate):
+            return None
+        return candidate
+
+    def _file_signature(self, path: Path) -> tuple[int, int] | None:
+        try:
+            if not path.exists() or not path.is_file():
+                return None
+            stat = path.stat()
+            return (int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            return None
+
+    def _capture_output_baseline(self, *, context: Any, cwd: Path, command_text: str) -> dict[str, tuple[int, int] | None]:
+        baseline: dict[str, tuple[int, int] | None] = {}
+        for token in self._extract_command_path_tokens(command_text):
+            resolved = self._resolve_candidate_path(context=context, cwd=cwd, token=token)
+            if resolved is None:
+                continue
+            baseline[str(resolved)] = self._file_signature(resolved)
+        return baseline
+
+    def _detect_output_files(
+        self,
+        *,
+        context: Any,
+        cwd: Path,
+        command_text: str,
+        stdout: str,
+        stderr: str,
+        baseline: dict[str, tuple[int, int] | None],
+    ) -> list[str]:
+        candidate_tokens = self._extract_command_path_tokens(command_text)
+        candidate_tokens.update(self._extract_runtime_path_tokens(stdout))
+        candidate_tokens.update(self._extract_runtime_path_tokens(stderr))
+
+        root = context.root_path.resolve()
+        discovered: list[str] = []
+        seen: set[str] = set()
+
+        for token in candidate_tokens:
+            resolved = self._resolve_candidate_path(context=context, cwd=cwd, token=token)
+            if resolved is None:
+                continue
+
+            current_sig = self._file_signature(resolved)
+            if current_sig is None:
+                continue
+
+            before_sig = baseline.get(str(resolved))
+            if before_sig is not None and before_sig == current_sig:
+                continue
+
+            rel = str(resolved.relative_to(root))
+            rel_lower = rel.lower()
+            if rel_lower in seen:
+                continue
+            seen.add(rel_lower)
+            discovered.append(rel)
+            if len(discovered) >= 10:
+                break
+
+        return discovered
+
+    def _append_output_file_tags(self, content: str, output_files: list[str]) -> str:
+        if not output_files:
+            return content
+
+        normalized = content.strip()
+        lowered = normalized.lower()
+        missing = [
+            path for path in output_files
+            if STASH_FILE_TAG_TEMPLATE.format(path=path).lower() not in lowered
+        ]
+        if not missing:
+            return normalized
+
+        tags = "\n".join(f"- {STASH_FILE_TAG_TEMPLATE.format(path=path)}" for path in missing[:10])
+        suffix = "Output files:\n" + tags
+        if normalized:
+            return normalized + "\n\n" + suffix
+        return suffix
+
     def start_run(self, *, project_id: str, conversation_id: str, trigger_message_id: str, mode: str) -> dict[str, Any]:
         context = self.project_store.get(project_id)
         if context is None:
             raise ValueError("Unknown project")
 
         repo = ProjectRepository(context)
+        recovered = repo.recover_orphaned_runs(active_run_ids=set(self._tasks.keys()))
+        if recovered:
+            logger.warning("Recovered %s orphaned run(s) before starting new run project_id=%s", recovered, project_id)
         run = repo.create_run(conversation_id, trigger_message_id, mode=mode)
 
         task = asyncio.create_task(
@@ -176,10 +324,19 @@ class RunOrchestrator:
                 )
 
             tool_summaries: list[str] = []
+            tool_results_for_response: list[dict[str, Any]] = []
+            output_files_for_response: list[str] = []
+            output_file_seen: set[str] = set()
             failures = 0
 
             if plan.commands:
                 for step_index, command in enumerate(plan.commands, start=1):
+                    command_base_cwd = self._resolve_command_base_cwd(context=context, command_cwd=command.cwd)
+                    baseline = self._capture_output_baseline(
+                        context=context,
+                        cwd=command_base_cwd,
+                        command_text=command.cmd,
+                    )
                     with context.lock:
                         step_id = repo.create_run_step(
                             run_id,
@@ -214,6 +371,16 @@ class RunOrchestrator:
                             "started_at": result.started_at,
                             "finished_at": result.finished_at,
                         }
+                        output_files = self._detect_output_files(
+                            context=context,
+                            cwd=Path(result.cwd),
+                            command_text=command.cmd,
+                            stdout=result.stdout or "",
+                            stderr=result.stderr or "",
+                            baseline=baseline,
+                        )
+                        if output_files:
+                            output["output_files"] = output_files
                         status = "completed" if result.exit_code == 0 else "failed"
                         if result.exit_code != 0:
                             failures += 1
@@ -228,6 +395,8 @@ class RunOrchestrator:
                             }
                             if result.exit_code != 0 and failure_detail:
                                 event_payload["detail"] = failure_detail
+                            if output_files:
+                                event_payload["output_files"] = output_files
                             repo.add_event(
                                 "run_step_completed",
                                 conversation_id=conversation_id,
@@ -252,6 +421,22 @@ class RunOrchestrator:
                         if result.exit_code != 0 and failure_detail:
                             summary += f" ({failure_detail})"
                         tool_summaries.append(summary)
+                        tool_results_for_response.append(
+                            {
+                                "step_index": step_index,
+                                "status": status,
+                                "exit_code": result.exit_code,
+                                "cmd": command.cmd,
+                                "stdout": result.stdout,
+                                "stderr": result.stderr,
+                            }
+                        )
+                        for artifact in output_files:
+                            artifact_lower = artifact.lower()
+                            if artifact_lower in output_file_seen:
+                                continue
+                            output_file_seen.add(artifact_lower)
+                            output_files_for_response.append(artifact)
 
                     except (CodexCommandError, RuntimeError) as exc:
                         failures += 1
@@ -264,17 +449,43 @@ class RunOrchestrator:
                                 payload={"step_id": step_id, "step_index": step_index, "status": "failed", "error": str(exc)},
                             )
                         tool_summaries.append(f"Step {step_index}: failed ({exc})")
+                        tool_results_for_response.append(
+                            {
+                                "step_index": step_index,
+                                "status": "failed",
+                                "exit_code": 1,
+                                "cmd": command.cmd,
+                                "stdout": "",
+                                "stderr": str(exc),
+                            }
+                        )
+            assistant_content = self.planner.sanitize_assistant_text(plan.planner_text) or plan.planner_text
+            synthesized = self.planner.synthesize_response(
+                user_message=str(trigger_msg.get("content", "")),
+                planner_text=plan.planner_text,
+                project_summary=repo.project_view(),
+                tool_results=tool_results_for_response,
+                output_files=output_files_for_response,
+            )
+            if synthesized:
+                assistant_content = synthesized
 
-            assistant_content = plan.planner_text
-            if tool_summaries:
+            assistant_content = self._append_output_file_tags(assistant_content, output_files_for_response)
+            if failures and tool_summaries:
                 assistant_content += "\n\nExecution summary:\n- " + "\n- ".join(tool_summaries)
+            elif not assistant_content.strip() and tool_summaries:
+                assistant_content = "Execution summary:\n- " + "\n- ".join(tool_summaries)
 
             with context.lock:
+                assistant_parts: list[dict[str, Any]] = [
+                    {"type": "output_file", "path": path}
+                    for path in output_files_for_response[:10]
+                ]
                 final_message = repo.create_message(
                     conversation_id,
                     role="assistant",
                     content=assistant_content,
-                    parts=[],
+                    parts=assistant_parts,
                     parent_message_id=trigger_message_id,
                     metadata={"run_id": run_id},
                 )
