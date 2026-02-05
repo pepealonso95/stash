@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from .config import Settings
+from .runtime_config import RuntimeConfig, RuntimeConfigStore
 from .types import ExecutionResult, ProjectContext, TaggedCommand
 from .utils import ensure_inside, stable_slug, utc_now_iso
 
@@ -88,8 +89,14 @@ def parse_tagged_commands(text: str) -> list[TaggedCommand]:
 
 
 class CodexExecutor:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, runtime_config_store: RuntimeConfigStore | None = None):
         self.settings = settings
+        self.runtime_config_store = runtime_config_store
+
+    def _runtime_config(self) -> RuntimeConfig:
+        if self.runtime_config_store is not None:
+            return self.runtime_config_store.get()
+        return RuntimeConfig.from_settings(self.settings)
 
     def _resolve_worktree(self, context: ProjectContext, worktree_label: str | None) -> Path:
         label = worktree_label or "default"
@@ -189,10 +196,17 @@ class CodexExecutor:
             return exit_code, "", last_agent_message
         return exit_code, "", f"Command failed (status={status or 'failed'})"
 
-    def _run_command_via_codex_cli(self, *, cwd: Path, command: str) -> tuple[int, str, str]:
+    def _run_command_via_codex_cli(
+        self,
+        *,
+        cwd: Path,
+        command: str,
+        codex_bin: str,
+        codex_model: str | None,
+    ) -> tuple[int, str, str]:
         prompt = self._build_codex_exec_prompt(command)
         cmdline = [
-            self.settings.codex_bin,
+            codex_bin,
             "exec",
             "--json",
             "--skip-git-repo-check",
@@ -200,8 +214,10 @@ class CodexExecutor:
             "workspace-write",
             "-C",
             str(cwd),
-            prompt,
         ]
+        if codex_model:
+            cmdline.extend(["-m", codex_model])
+        cmdline.append(prompt)
 
         proc = subprocess.run(
             cmdline,
@@ -220,6 +236,7 @@ class CodexExecutor:
 
     def execute(self, context: ProjectContext, command: TaggedCommand) -> ExecutionResult:
         self._validate_command(command.cmd)
+        runtime = self._runtime_config()
 
         worktree_path = self._resolve_worktree(context, command.worktree)
         cwd = self._resolve_cwd(context, command, worktree_path)
@@ -237,21 +254,26 @@ class CodexExecutor:
         engine = "shell"
         logger.info(
             "Executing command mode=%s worktree=%s cwd=%s cmd=%s",
-            self.settings.codex_mode,
+            runtime.codex_mode,
             command.worktree or "default",
             str(cwd),
             command.cmd.replace("\n", " ")[:300],
         )
 
         try:
-            if self.settings.codex_mode == "cli":
-                exit_code, stdout, stderr = self._run_command_via_codex_cli(cwd=cwd, command=command.cmd)
+            if runtime.codex_mode == "cli":
+                exit_code, stdout, stderr = self._run_command_via_codex_cli(
+                    cwd=cwd,
+                    command=command.cmd,
+                    codex_bin=runtime.codex_bin,
+                    codex_model=runtime.codex_planner_model,
+                )
                 engine = "codex-cli"
             else:
                 exit_code, stdout, stderr = self._run_command_via_shell(cwd=cwd, command=command.cmd)
                 engine = "shell"
         except FileNotFoundError:
-            if self.settings.codex_mode == "cli":
+            if runtime.codex_mode == "cli":
                 # Fallback keeps the pipeline functional when codex binary is missing.
                 exit_code, stdout, shell_stderr = self._run_command_via_shell(cwd=cwd, command=command.cmd)
                 stderr = f"codex binary not found; executed via shell fallback\n{shell_stderr}"

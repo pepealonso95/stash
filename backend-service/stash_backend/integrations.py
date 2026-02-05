@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .config import Settings
+from .runtime_config import RuntimeConfig
 
 
 def resolve_binary(binary: str) -> str | None:
@@ -18,49 +18,73 @@ def resolve_binary(binary: str) -> str | None:
     return shutil.which(binary)
 
 
-def codex_integration_status(settings: Settings) -> dict[str, Any]:
-    resolved = resolve_binary(settings.codex_bin)
-    openai_enabled = bool(settings.openai_api_key and settings.openai_model)
+def codex_integration_status(runtime: RuntimeConfig) -> dict[str, Any]:
+    resolved = resolve_binary(runtime.codex_bin)
+    openai_api_key_set = bool(runtime.openai_api_key)
     status: dict[str, Any] = {
-        "codex_mode": settings.codex_mode,
-        "codex_bin": settings.codex_bin,
+        "planner_backend": runtime.planner_backend,
+        "codex_mode": runtime.codex_mode,
+        "codex_bin": runtime.codex_bin,
         "codex_bin_resolved": resolved,
         "codex_available": resolved is not None,
-        "planner_cmd_configured": bool(settings.planner_cmd),
-        "openai_planner_configured": openai_enabled,
-        "openai_model": settings.openai_model if openai_enabled else None,
-        "openai_base_url": settings.openai_base_url if openai_enabled else None,
+        "planner_cmd_configured": bool(runtime.planner_cmd),
+        "codex_planner_model": runtime.codex_planner_model,
+        "openai_api_key_set": openai_api_key_set,
+        "openai_planner_configured": openai_api_key_set and bool(runtime.openai_model),
+        "openai_model": runtime.openai_model,
+        "openai_base_url": runtime.openai_base_url,
     }
 
-    if settings.codex_mode != "cli":
+    if runtime.codex_mode != "cli":
         status["login_checked"] = False
         status["login_ok"] = None
-        status["detail"] = "CLI login check skipped because STASH_CODEX_MODE is not 'cli'."
-        return status
-
-    if not resolved:
+        status["detail"] = "CLI login check skipped because codex_mode is not 'cli'."
+    elif not resolved:
         status["login_checked"] = False
         status["login_ok"] = False
         status["detail"] = "Codex binary is not executable."
-        return status
+    else:
+        try:
+            proc = subprocess.run(
+                [resolved, "login", "status"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            raw = ((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")).strip()
+            status["login_checked"] = True
+            status["login_ok"] = proc.returncode == 0 and bool(raw)
+            status["detail"] = raw[:1000]
+            status["login_exit_code"] = int(proc.returncode)
+        except Exception as exc:
+            status["login_checked"] = True
+            status["login_ok"] = False
+            status["detail"] = f"Failed to run `codex login status`: {exc}"
 
-    try:
-        proc = subprocess.run(
-            [resolved, "login", "status"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except Exception as exc:
-        status["login_checked"] = True
-        status["login_ok"] = False
-        status["detail"] = f"Failed to run `codex login status`: {exc}"
-        return status
+    codex_ready = bool(status.get("codex_available")) and bool(status.get("login_ok"))
+    openai_ready = bool(status.get("openai_planner_configured"))
+    status["codex_planner_ready"] = codex_ready
+    status["openai_planner_ready"] = openai_ready
+    status["gpt_via_codex_cli_possible"] = codex_ready
 
-    raw = ((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")).strip()
-    status["login_checked"] = True
-    status["login_ok"] = proc.returncode == 0 and bool(raw)
-    status["detail"] = raw[:1000]
-    status["login_exit_code"] = int(proc.returncode)
+    blockers: list[str] = []
+    if runtime.planner_backend == "openai_api":
+        if not openai_ready:
+            blockers.append("OpenAI API key is missing for OpenAI planner mode.")
+    elif runtime.planner_backend == "codex_cli":
+        if not codex_ready:
+            blockers.append("Codex CLI is not ready. Verify binary path and login status.")
+        if not openai_ready:
+            blockers.append("Optional fallback unavailable: OpenAI API key is not configured.")
+    else:
+        if not codex_ready and not openai_ready:
+            blockers.append("Neither Codex CLI nor OpenAI API planner is ready.")
+        if not codex_ready:
+            blockers.append("Codex CLI not ready for GPT-through-Codex path.")
+        if not openai_ready:
+            blockers.append("OpenAI API key fallback is not configured.")
+
+    status["planner_ready"] = bool(codex_ready or openai_ready)
+    status["blockers"] = blockers
     return status

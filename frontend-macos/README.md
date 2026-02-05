@@ -32,11 +32,12 @@ The app expects the backend service at:
 
 - `http://127.0.0.1:8765` by default
 
-You can override with environment variable before launch:
+Runtime AI configuration is managed inside the app via **AI Setup**:
 
-```bash
-STASH_BACKEND_URL=http://127.0.0.1:8765
-```
+- Planner backend (`auto`, `codex_cli`, `openai_api`)
+- Codex CLI binary/model/login checks
+- Optional OpenAI API key fallback
+- Settings persisted by backend in local runtime config file
 
 ## Build and run
 

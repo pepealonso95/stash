@@ -25,6 +25,21 @@ final class AppViewModel: ObservableObject {
     @Published var runTodos: [RunTodo] = []
     @Published var mentionSuggestions: [FileItem] = []
     @Published var mentionedFilePaths: [String] = []
+    @Published var setupStatus: RuntimeSetupStatus?
+    @Published var runtimeConfig: RuntimeConfigPayload?
+    @Published var setupSheetPresented = false
+    @Published var setupSaving = false
+    @Published var setupPlannerBackend = "auto"
+    @Published var setupCodexMode = "cli"
+    @Published var setupCodexBin = "codex"
+    @Published var setupCodexPlannerModel = "gpt-5-mini"
+    @Published var setupPlannerCmd = ""
+    @Published var setupPlannerTimeoutSeconds = "150"
+    @Published var setupOpenAIAPIKey = ""
+    @Published var setupOpenAIModel = "gpt-5-mini"
+    @Published var setupOpenAIBaseURL = "https://api.openai.com/v1"
+    @Published var setupOpenAITimeoutSeconds = "60"
+    @Published var setupStatusText: String?
 
     @Published var errorText: String?
 
@@ -44,8 +59,7 @@ final class AppViewModel: ObservableObject {
     private var client: BackendClient
 
     init() {
-        let defaultURL = ProcessInfo.processInfo.environment["STASH_BACKEND_URL"] ?? "http://127.0.0.1:8765"
-        client = BackendClient(baseURL: URL(string: defaultURL) ?? URL(string: "http://127.0.0.1:8765")!)
+        client = BackendClient(baseURL: URL(string: "http://127.0.0.1:8765")!)
     }
 
     deinit {
@@ -56,6 +70,17 @@ final class AppViewModel: ObservableObject {
 
     var selectedConversation: Conversation? {
         conversations.first { $0.id == selectedConversationID }
+    }
+
+    var aiSetupReady: Bool {
+        setupStatus?.plannerReady == true
+    }
+
+    var aiSetupBadgeText: String {
+        if setupStatus?.plannerReady == true {
+            return "AI Ready"
+        }
+        return "Setup Required"
     }
 
     var filteredFiles: [FileItem] {
@@ -88,6 +113,12 @@ final class AppViewModel: ObservableObject {
         didBootstrap = true
 
         await pingBackend()
+        if backendConnected {
+            await refreshRuntimeSetup()
+            if !aiSetupReady {
+                setupSheetPresented = true
+            }
+        }
 
         if let lastPath = defaults.string(forKey: lastProjectPathKey),
            FileManager.default.fileExists(atPath: lastPath)
@@ -107,6 +138,72 @@ final class AppViewModel: ObservableObject {
             backendConnected = false
             backendStatusText = "Offline"
             errorText = error.localizedDescription
+        }
+    }
+
+    func openSetupSheet() {
+        setupSheetPresented = true
+        Task { await refreshRuntimeSetup() }
+    }
+
+    func refreshRuntimeSetup() async {
+        guard backendConnected else { return }
+        do {
+            let config = try await client.runtimeConfig()
+            let status = try await client.runtimeSetupStatus()
+            runtimeConfig = config
+            setupStatus = status
+            setupPlannerBackend = config.plannerBackend
+            setupCodexMode = config.codexMode
+            setupCodexBin = config.codexBin
+            setupCodexPlannerModel = config.codexPlannerModel
+            setupPlannerCmd = config.plannerCmd ?? ""
+            setupPlannerTimeoutSeconds = String(config.plannerTimeoutSeconds)
+            setupOpenAIModel = config.openaiModel
+            setupOpenAIBaseURL = config.openaiBaseUrl
+            setupOpenAITimeoutSeconds = String(config.openaiTimeoutSeconds)
+            setupStatusText = status.plannerReady ? "AI setup is ready." : "Complete setup to run AI tasks."
+        } catch {
+            setupStatusText = "Could not load setup status: \(error.localizedDescription)"
+        }
+    }
+
+    func saveRuntimeSetup() async {
+        guard backendConnected else {
+            setupStatusText = "Backend is offline."
+            return
+        }
+        setupSaving = true
+        defer { setupSaving = false }
+
+        let plannerCmdTrimmed = setupPlannerCmd.trimmingCharacters(in: .whitespacesAndNewlines)
+        let openAIKeyTrimmed = setupOpenAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let plannerTimeout = Int(setupPlannerTimeoutSeconds) ?? 150
+        let openAITimeout = Int(setupOpenAITimeoutSeconds) ?? 60
+
+        do {
+            _ = try await client.updateRuntimeConfig(
+                plannerBackend: setupPlannerBackend,
+                codexMode: setupCodexMode,
+                codexBin: setupCodexBin,
+                codexPlannerModel: setupCodexPlannerModel,
+                plannerCmd: plannerCmdTrimmed.isEmpty ? nil : plannerCmdTrimmed,
+                clearPlannerCmd: plannerCmdTrimmed.isEmpty,
+                plannerTimeoutSeconds: plannerTimeout,
+                openaiAPIKey: openAIKeyTrimmed.isEmpty ? nil : openAIKeyTrimmed,
+                clearOpenAIAPIKey: false,
+                openaiModel: setupOpenAIModel,
+                openaiBaseURL: setupOpenAIBaseURL,
+                openaiTimeoutSeconds: openAITimeout
+            )
+            setupOpenAIAPIKey = ""
+            await refreshRuntimeSetup()
+            if aiSetupReady {
+                setupSheetPresented = false
+                errorText = nil
+            }
+        } catch {
+            setupStatusText = "Could not save setup: \(error.localizedDescription)"
         }
     }
 
@@ -144,6 +241,9 @@ final class AppViewModel: ObservableObject {
             await refreshConversations()
             await autoIndexCurrentProject()
             await pingBackend()
+            if backendConnected {
+                await refreshRuntimeSetup()
+            }
             errorText = nil
         } catch {
             errorText = "Could not open project: \(error.localizedDescription)"
@@ -436,6 +536,12 @@ final class AppViewModel: ObservableObject {
     func sendComposerMessage() async {
         let content = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
+
+        if !aiSetupReady {
+            errorText = "AI setup is required before running tasks."
+            setupSheetPresented = true
+            return
+        }
 
         guard let projectID = project?.id else {
             errorText = "Open a project first"

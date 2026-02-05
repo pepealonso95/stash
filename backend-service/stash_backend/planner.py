@@ -10,6 +10,7 @@ from urllib import error, request
 
 from .codex import ALLOWED_PREFIXES, parse_tagged_commands
 from .config import Settings
+from .runtime_config import RuntimeConfig, RuntimeConfigStore
 from .types import PlanResult
 
 MAX_HISTORY_ITEMS = 20
@@ -40,16 +41,22 @@ logger = logging.getLogger(__name__)
 
 
 class Planner:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, runtime_config_store: RuntimeConfigStore | None = None):
         self.settings = settings
+        self.runtime_config_store = runtime_config_store
 
-    def _run_external_planner(self, payload: dict[str, Any]) -> str | None:
-        if not self.settings.planner_cmd:
+    def _runtime_config(self) -> RuntimeConfig:
+        if self.runtime_config_store is not None:
+            return self.runtime_config_store.get()
+        return RuntimeConfig.from_settings(self.settings)
+
+    def _run_external_planner(self, payload: dict[str, Any], *, runtime: RuntimeConfig) -> str | None:
+        if not runtime.planner_cmd:
             return None
 
         try:
             proc = subprocess.run(
-                ["bash", "-lc", self.settings.planner_cmd],
+                ["bash", "-lc", runtime.planner_cmd],
                 input=json.dumps(payload),
                 text=True,
                 capture_output=True,
@@ -68,11 +75,11 @@ class Planner:
         logger.info("External planner produced output chars=%s", len(output))
         return output if output else None
 
-    def _openai_available(self) -> bool:
-        return bool(self.settings.openai_api_key and self.settings.openai_model)
+    def _openai_available(self, *, runtime: RuntimeConfig) -> bool:
+        return bool(runtime.openai_api_key and runtime.openai_model)
 
-    def _codex_available(self) -> bool:
-        return shutil.which(self.settings.codex_bin) is not None
+    def _codex_available(self, *, runtime: RuntimeConfig) -> bool:
+        return shutil.which(runtime.codex_bin) is not None
 
     def _extract_agent_message_from_jsonl(self, output: str) -> str | None:
         last_message = ""
@@ -184,12 +191,13 @@ class Planner:
         conversation_history: list[dict[str, Any]],
         skill_bundle: str,
         project_summary: dict[str, Any],
+        runtime: RuntimeConfig,
         max_history_items: int = MAX_HISTORY_ITEMS,
         max_history_content_chars: int = MAX_HISTORY_CONTENT_CHARS,
         max_skills_chars: int = MAX_SKILLS_CHARS,
         require_commands: bool = False,
     ) -> str | None:
-        if not self._openai_available():
+        if not self._openai_available(runtime=runtime):
             return None
 
         planner_prompt = self._build_planner_prompt(
@@ -203,19 +211,19 @@ class Planner:
             require_commands=require_commands,
         )
         payload = {
-            "model": self.settings.openai_model,
+            "model": runtime.openai_model,
             "input": planner_prompt,
         }
         body = json.dumps(payload).encode("utf-8")
-        url = f"{self.settings.openai_base_url.rstrip('/')}/responses"
+        url = f"{runtime.openai_base_url.rstrip('/')}/responses"
         headers = {
-            "Authorization": f"Bearer {self.settings.openai_api_key}",
+            "Authorization": f"Bearer {runtime.openai_api_key}",
             "Content-Type": "application/json",
         }
         req = request.Request(url, data=body, headers=headers, method="POST")
 
         try:
-            with request.urlopen(req, timeout=self.settings.openai_timeout_seconds) as response:
+            with request.urlopen(req, timeout=runtime.openai_timeout_seconds) as response:
                 response_text = response.read().decode("utf-8", errors="replace")
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -257,6 +265,7 @@ class Planner:
         conversation_history: list[dict[str, Any]],
         skill_bundle: str,
         project_summary: dict[str, Any],
+        runtime: RuntimeConfig,
         max_history_items: int = MAX_HISTORY_ITEMS,
         max_history_content_chars: int = MAX_HISTORY_CONTENT_CHARS,
         max_skills_chars: int = MAX_SKILLS_CHARS,
@@ -264,12 +273,12 @@ class Planner:
         timeout_seconds: int | None = None,
         attempt_label: str = "primary",
     ) -> str | None:
-        if not self._codex_available():
-            logger.warning("Codex planner unavailable: binary '%s' not found", self.settings.codex_bin)
+        if not self._codex_available(runtime=runtime):
+            logger.warning("Codex planner unavailable: binary '%s' not found", runtime.codex_bin)
             return None
 
         planning_cwd = str(project_summary.get("root_path") or ".")
-        planner_timeout = timeout_seconds or self.settings.planner_timeout_seconds
+        planner_timeout = timeout_seconds or runtime.planner_timeout_seconds
         prompt = self._build_planner_prompt(
             user_message=user_message,
             conversation_history=conversation_history,
@@ -282,7 +291,7 @@ class Planner:
         )
 
         cmdline = [
-            self.settings.codex_bin,
+            runtime.codex_bin,
             "exec",
             "--json",
             "--skip-git-repo-check",
@@ -290,8 +299,10 @@ class Planner:
             "read-only",
             "-C",
             planning_cwd,
-            "-",
         ]
+        if runtime.codex_planner_model:
+            cmdline.extend(["-m", runtime.codex_planner_model])
+        cmdline.append("-")
 
         try:
             proc = subprocess.run(
@@ -344,6 +355,88 @@ class Planner:
         lowered = user_message.lower()
         return any(keyword in lowered for keyword in ACTION_KEYWORDS)
 
+    def _attempt_openai(
+        self,
+        *,
+        actionable: bool,
+        user_message: str,
+        conversation_history: list[dict[str, Any]],
+        skill_bundle: str,
+        project_summary: dict[str, Any],
+        runtime: RuntimeConfig,
+    ) -> PlanResult | None:
+        openai_started = time.monotonic()
+        openai_text = self._run_openai_planner(
+            user_message=user_message,
+            conversation_history=conversation_history,
+            skill_bundle=skill_bundle,
+            project_summary=project_summary,
+            runtime=runtime,
+            require_commands=actionable,
+        )
+        logger.info("OpenAI planner attempt duration_ms=%s", int((time.monotonic() - openai_started) * 1000))
+        if not openai_text:
+            return None
+        commands = parse_tagged_commands(openai_text)
+        if commands or not actionable:
+            logger.info("Planner selected OpenAI planner path commands=%s", len(commands))
+            return PlanResult(planner_text=openai_text, commands=commands)
+        logger.warning("OpenAI planner returned no commands for actionable request")
+        return None
+
+    def _attempt_codex(
+        self,
+        *,
+        actionable: bool,
+        user_message: str,
+        conversation_history: list[dict[str, Any]],
+        skill_bundle: str,
+        project_summary: dict[str, Any],
+        runtime: RuntimeConfig,
+    ) -> PlanResult | None:
+        codex_started = time.monotonic()
+        codex_text = self._run_codex_planner(
+            user_message=user_message,
+            conversation_history=conversation_history,
+            skill_bundle=skill_bundle,
+            project_summary=project_summary,
+            runtime=runtime,
+            require_commands=actionable,
+            attempt_label="primary",
+        )
+        logger.info("Codex planner primary attempt duration_ms=%s", int((time.monotonic() - codex_started) * 1000))
+        if codex_text:
+            commands = parse_tagged_commands(codex_text)
+            if commands or not actionable:
+                logger.info("Planner selected codex planner path commands=%s", len(commands))
+                return PlanResult(planner_text=codex_text, commands=commands)
+            logger.warning("Codex planner primary attempt produced no commands for actionable request")
+
+        retry_timeout = max(30, min(runtime.planner_timeout_seconds, 60))
+        retry_started = time.monotonic()
+        codex_retry_text = self._run_codex_planner(
+            user_message=user_message,
+            conversation_history=conversation_history,
+            skill_bundle=skill_bundle,
+            project_summary=project_summary,
+            runtime=runtime,
+            max_history_items=RETRY_HISTORY_ITEMS,
+            max_history_content_chars=RETRY_HISTORY_CONTENT_CHARS,
+            max_skills_chars=RETRY_SKILLS_CHARS,
+            require_commands=actionable,
+            timeout_seconds=retry_timeout,
+            attempt_label="retry",
+        )
+        logger.info("Codex planner retry attempt duration_ms=%s", int((time.monotonic() - retry_started) * 1000))
+        if not codex_retry_text:
+            return None
+        commands = parse_tagged_commands(codex_retry_text)
+        if commands or not actionable:
+            logger.info("Planner selected codex retry path commands=%s", len(commands))
+            return PlanResult(planner_text=codex_retry_text, commands=commands)
+        logger.warning("Codex planner retry produced no commands for actionable request")
+        return None
+
     def plan(
         self,
         *,
@@ -352,6 +445,7 @@ class Planner:
         skill_bundle: str,
         project_summary: dict[str, Any],
     ) -> PlanResult:
+        runtime = self._runtime_config()
         direct_commands = parse_tagged_commands(user_message)
         if direct_commands:
             logger.info("Planner using direct tagged commands count=%s", len(direct_commands))
@@ -372,7 +466,7 @@ class Planner:
                 "Use only safe filesystem/coding commands."
             ),
         }
-        external_text = self._run_external_planner(external_payload)
+        external_text = self._run_external_planner(external_payload, runtime=runtime)
         if external_text:
             commands = parse_tagged_commands(external_text)
             if commands or not actionable:
@@ -380,66 +474,36 @@ class Planner:
                 return PlanResult(planner_text=external_text, commands=commands)
             logger.warning("External planner returned no commands for actionable request")
 
-        openai_started = time.monotonic()
-        openai_text = self._run_openai_planner(
-            user_message=user_message,
-            conversation_history=conversation_history,
-            skill_bundle=skill_bundle,
-            project_summary=project_summary,
-            require_commands=actionable,
-        )
-        logger.info("OpenAI planner attempt duration_ms=%s", int((time.monotonic() - openai_started) * 1000))
-        if openai_text:
-            commands = parse_tagged_commands(openai_text)
-            if commands or not actionable:
-                logger.info("Planner selected OpenAI planner path commands=%s", len(commands))
-                return PlanResult(planner_text=openai_text, commands=commands)
-            logger.warning("OpenAI planner returned no commands for actionable request")
+        # Use GPT through Codex CLI first whenever possible.
+        planner_order = ["codex", "openai"]
+        if runtime.planner_backend == "openai_api":
+            planner_order = ["openai", "codex"]
 
-        codex_started = time.monotonic()
-        codex_text = self._run_codex_planner(
-            user_message=user_message,
-            conversation_history=conversation_history,
-            skill_bundle=skill_bundle,
-            project_summary=project_summary,
-            require_commands=actionable,
-            attempt_label="primary",
-        )
-        logger.info("Codex planner primary attempt duration_ms=%s", int((time.monotonic() - codex_started) * 1000))
-        if codex_text:
-            commands = parse_tagged_commands(codex_text)
-            if commands or not actionable:
-                logger.info("Planner selected codex planner path commands=%s", len(commands))
-                return PlanResult(planner_text=codex_text, commands=commands)
-            logger.warning("Codex planner primary attempt produced no commands for actionable request")
-
-        retry_timeout = max(30, min(self.settings.planner_timeout_seconds, 60))
-        retry_started = time.monotonic()
-        codex_retry_text = self._run_codex_planner(
-            user_message=user_message,
-            conversation_history=conversation_history,
-            skill_bundle=skill_bundle,
-            project_summary=project_summary,
-            max_history_items=RETRY_HISTORY_ITEMS,
-            max_history_content_chars=RETRY_HISTORY_CONTENT_CHARS,
-            max_skills_chars=RETRY_SKILLS_CHARS,
-            require_commands=actionable,
-            timeout_seconds=retry_timeout,
-            attempt_label="retry",
-        )
-        logger.info("Codex planner retry attempt duration_ms=%s", int((time.monotonic() - retry_started) * 1000))
-        if codex_retry_text:
-            commands = parse_tagged_commands(codex_retry_text)
-            if commands or not actionable:
-                logger.info("Planner selected codex retry path commands=%s", len(commands))
-                return PlanResult(planner_text=codex_retry_text, commands=commands)
-            logger.warning("Codex planner retry produced no commands for actionable request")
+        for backend in planner_order:
+            if backend == "openai":
+                result = self._attempt_openai(
+                    actionable=actionable,
+                    user_message=user_message,
+                    conversation_history=conversation_history,
+                    skill_bundle=skill_bundle,
+                    project_summary=project_summary,
+                    runtime=runtime,
+                )
+            else:
+                result = self._attempt_codex(
+                    actionable=actionable,
+                    user_message=user_message,
+                    conversation_history=conversation_history,
+                    skill_bundle=skill_bundle,
+                    project_summary=project_summary,
+                    runtime=runtime,
+                )
+            if result is not None:
+                return result
 
         fallback = (
             "Planner fallback: could not generate an execution plan. "
-            "Verify Codex CLI is installed and logged in (`codex login status`) and set OpenAI planner "
-            "variables (`STASH_OPENAI_API_KEY`, optionally `STASH_OPENAI_MODEL`), "
-            "or provide a custom planner via STASH_PLANNER_CMD."
+            "Open AI setup in Stash and verify Codex CLI login, then configure OpenAI API key as fallback."
         )
         logger.error("Planner fallback reached: no commands generated")
         return PlanResult(planner_text=fallback, commands=[])

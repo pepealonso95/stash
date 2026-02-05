@@ -29,6 +29,8 @@ from .schemas import (
     ProjectPatchRequest,
     ProjectResponse,
     RunResponse,
+    RuntimeConfigResponse,
+    RuntimeConfigUpdateRequest,
     SearchRequest,
     SearchResponse,
     TaskStatusResponse,
@@ -71,7 +73,33 @@ def create_app(services: Services) -> FastAPI:
 
     @app.get("/health/integrations")
     async def health_integrations() -> dict[str, Any]:
-        return codex_integration_status(services.settings)
+        return codex_integration_status(services.runtime_config.get())
+
+    @app.get("/v1/runtime/config", response_model=RuntimeConfigResponse)
+    async def get_runtime_config() -> RuntimeConfigResponse:
+        return RuntimeConfigResponse(**services.runtime_config.public_view())
+
+    @app.patch("/v1/runtime/config", response_model=RuntimeConfigResponse)
+    async def patch_runtime_config(request: RuntimeConfigUpdateRequest) -> RuntimeConfigResponse:
+        services.runtime_config.update(
+            planner_backend=request.planner_backend,
+            codex_mode=request.codex_mode,
+            codex_bin=request.codex_bin,
+            codex_planner_model=request.codex_planner_model,
+            planner_cmd=request.planner_cmd,
+            clear_planner_cmd=request.clear_planner_cmd,
+            planner_timeout_seconds=request.planner_timeout_seconds,
+            openai_api_key=request.openai_api_key,
+            clear_openai_api_key=request.clear_openai_api_key,
+            openai_model=request.openai_model,
+            openai_base_url=request.openai_base_url,
+            openai_timeout_seconds=request.openai_timeout_seconds,
+        )
+        return RuntimeConfigResponse(**services.runtime_config.public_view())
+
+    @app.get("/v1/runtime/setup-status")
+    async def runtime_setup_status() -> dict[str, Any]:
+        return codex_integration_status(services.runtime_config.get())
 
     @app.post("/v1/projects", response_model=ProjectResponse)
     async def create_or_open_project(request: ProjectCreateRequest) -> ProjectResponse:

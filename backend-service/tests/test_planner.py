@@ -5,6 +5,7 @@ from unittest import mock
 
 from stash_backend.config import Settings
 from stash_backend.planner import Planner
+from stash_backend.runtime_config import RuntimeConfig
 
 
 def _project_summary() -> dict[str, str]:
@@ -36,7 +37,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(result.commands, [])
         self.assertIn("Planner fallback: could not generate an execution plan.", result.planner_text)
 
-    def test_openai_planner_is_preferred_over_codex(self) -> None:
+    def test_openai_planner_is_used_when_configured_as_primary_backend(self) -> None:
         planner = Planner(
             Settings(
                 codex_bin="codex",
@@ -54,6 +55,11 @@ class PlannerTests(unittest.TestCase):
             "</codex_cmd>"
         )
         with (
+            mock.patch.object(
+                planner,
+                "_runtime_config",
+                return_value=RuntimeConfig(planner_backend="openai_api", openai_api_key="test-key"),
+            ),
             mock.patch.object(planner, "_run_external_planner", return_value=None),
             mock.patch.object(planner, "_run_openai_planner", return_value=openai_text) as mocked_openai,
             mock.patch.object(planner, "_run_codex_planner", return_value=None) as mocked_codex,
@@ -69,6 +75,33 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(mocked_codex.call_count, 0)
         self.assertEqual(len(result.commands), 1)
         self.assertEqual(result.commands[0].cmd, "echo from-openai")
+
+    def test_codex_planner_is_preferred_in_auto_mode(self) -> None:
+        planner = Planner(Settings(codex_bin="codex", planner_cmd=None))
+        codex_text = (
+            "Planning from codex.\n"
+            "<codex_cmd>\n"
+            "worktree: main\n"
+            "cwd: .\n"
+            "cmd: echo from-codex\n"
+            "</codex_cmd>"
+        )
+        with (
+            mock.patch.object(planner, "_run_external_planner", return_value=None),
+            mock.patch.object(planner, "_run_codex_planner", return_value=codex_text) as mocked_codex,
+            mock.patch.object(planner, "_run_openai_planner", return_value=None) as mocked_openai,
+        ):
+            result = planner.plan(
+                user_message="create notes.txt",
+                conversation_history=[],
+                skill_bundle="",
+                project_summary=_project_summary(),
+            )
+
+        self.assertEqual(mocked_codex.call_count, 1)
+        self.assertEqual(mocked_openai.call_count, 0)
+        self.assertEqual(len(result.commands), 1)
+        self.assertEqual(result.commands[0].cmd, "echo from-codex")
 
     def test_codex_retry_is_used_when_primary_attempt_has_no_commands(self) -> None:
         planner = Planner(Settings(codex_bin="codex", planner_cmd=None))

@@ -34,6 +34,9 @@ struct RootView: View {
         .task {
             await viewModel.bootstrap()
         }
+        .sheet(isPresented: $viewModel.setupSheetPresented) {
+            RuntimeSetupSheet(viewModel: viewModel)
+        }
     }
 }
 
@@ -71,9 +74,36 @@ private struct MinimalTopBar: View {
             }
             .buttonStyle(.plain)
 
+            Button {
+                viewModel.openSetupSheet()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "gearshape")
+                    Text("AI Setup")
+                }
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(CodexTheme.textPrimary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.white)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(CodexTheme.border, lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+
             StatusBadge(
                 text: viewModel.backendConnected ? "Backend Connected" : "Backend Offline",
                 color: viewModel.backendConnected ? CodexTheme.success : CodexTheme.warning
+            )
+
+            StatusBadge(
+                text: viewModel.aiSetupBadgeText,
+                color: viewModel.aiSetupReady ? CodexTheme.success : CodexTheme.warning
             )
 
             if let indexingStatusText = viewModel.indexingStatusText {
@@ -126,6 +156,11 @@ private struct EmptyProjectView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+
+            Button("Open AI Setup") {
+                viewModel.openSetupSheet()
+            }
+            .buttonStyle(.bordered)
 
             if let errorText = viewModel.errorText {
                 Text(errorText)
@@ -235,6 +270,12 @@ private struct ChatPanel: View {
                     .padding(.bottom, 8)
             }
 
+            if !viewModel.aiSetupReady {
+                SetupRequiredCard(viewModel: viewModel)
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 8)
+            }
+
             if let errorText = viewModel.errorText {
                 Text(errorText)
                     .font(.system(size: 11, weight: .medium, design: .rounded))
@@ -274,7 +315,7 @@ private struct ChatPanel: View {
                         Task { await viewModel.sendComposerMessage() }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(viewModel.isSending || viewModel.project == nil)
+                    .disabled(viewModel.isSending || viewModel.project == nil || !viewModel.aiSetupReady)
                 }
             }
             .padding(18)
@@ -344,6 +385,130 @@ private struct RunFeedbackCard: View {
             return "!"
         default:
             return "•"
+        }
+    }
+}
+
+private struct SetupRequiredCard: View {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("AI Setup Needed")
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(CodexTheme.textSecondary)
+
+            Text("Stash uses Codex CLI for execution and GPT planning through Codex CLI when available.")
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(CodexTheme.textPrimary)
+
+            if let blockers = viewModel.setupStatus?.blockers, !blockers.isEmpty {
+                ForEach(blockers, id: \.self) { blocker in
+                    Text("• \(blocker)")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(CodexTheme.warning)
+                }
+            }
+
+            Button("Open AI Setup") {
+                viewModel.openSetupSheet()
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
+        )
+    }
+}
+
+private struct RuntimeSetupSheet: View {
+    @ObservedObject var viewModel: AppViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("AI Runtime Setup")
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundStyle(CodexTheme.textPrimary)
+
+            Text("Configure GPT + Codex once. Settings are stored locally by the backend, not in `.env`.")
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(CodexTheme.textSecondary)
+
+            Form {
+                Picker("Planner backend", selection: $viewModel.setupPlannerBackend) {
+                    Text("Auto (Codex GPT first)").tag("auto")
+                    Text("Codex CLI primary").tag("codex_cli")
+                    Text("OpenAI API primary").tag("openai_api")
+                }
+
+                Picker("Execution mode", selection: $viewModel.setupCodexMode) {
+                    Text("Codex CLI").tag("cli")
+                    Text("Shell").tag("shell")
+                }
+
+                TextField("Codex binary", text: $viewModel.setupCodexBin)
+                TextField("Codex planner model", text: $viewModel.setupCodexPlannerModel)
+                TextField("Planner command override (optional)", text: $viewModel.setupPlannerCmd)
+                TextField("Planner timeout (seconds)", text: $viewModel.setupPlannerTimeoutSeconds)
+
+                Divider()
+
+                SecureField("OpenAI API key (fallback or primary)", text: $viewModel.setupOpenAIAPIKey)
+                TextField("OpenAI model", text: $viewModel.setupOpenAIModel)
+                TextField("OpenAI base URL", text: $viewModel.setupOpenAIBaseURL)
+                TextField("OpenAI timeout (seconds)", text: $viewModel.setupOpenAITimeoutSeconds)
+            }
+
+            if let setupStatus = viewModel.setupStatus {
+                HStack(spacing: 10) {
+                    Text(setupStatus.plannerReady ? "Ready" : "Not ready")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(setupStatus.plannerReady ? CodexTheme.success : CodexTheme.warning)
+                    Text(setupStatus.detail ?? "")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(CodexTheme.textSecondary)
+                        .lineLimit(2)
+                }
+            }
+
+            if let setupStatusText = viewModel.setupStatusText {
+                Text(setupStatusText)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(CodexTheme.textSecondary)
+            }
+
+            HStack {
+                Button("Refresh Checks") {
+                    Task { await viewModel.refreshRuntimeSetup() }
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
+
+                Button("Save") {
+                    Task {
+                        await viewModel.saveRuntimeSetup()
+                        if viewModel.aiSetupReady {
+                            dismiss()
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.setupSaving)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 620, minHeight: 560)
+        .task {
+            await viewModel.refreshRuntimeSetup()
         }
     }
 }

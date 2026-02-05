@@ -71,11 +71,7 @@ This does a single local setup for the stack:
 
 - Creates `.venv/`
 - Installs backend dependencies
-- Writes `.env.local` with:
-  - `STASH_BACKEND_URL=http://127.0.0.1:8765`
-  - `STASH_CODEX_MODE=cli`
-  - `STASH_OPENAI_MODEL=gpt-5-mini`
-  - Optional `STASH_OPENAI_API_KEY` placeholder for GPT planning
+- Uses app-managed runtime configuration (no `.env` setup required)
 - Optionally writes frontend config when `STASH_FRONTEND_CONFIG_PATH` is set
 
 Run commands:
@@ -105,6 +101,7 @@ Frontend run/integration notes:
 
 Codex requirement:
 - Run `codex login status` once before using chat runs so planner/executor can use local Codex CLI.
+- Open **AI Setup** in the frontend to configure planner mode and optional OpenAI API fallback.
 
 ## License
 TBD

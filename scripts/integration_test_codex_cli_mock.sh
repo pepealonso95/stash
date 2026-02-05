@@ -8,6 +8,7 @@ PROJECT_ROOT="$TMP_BASE/project"
 FAKE_CODEX="$TMP_BASE/fake-codex"
 FAKE_CODEX_LOG="$TMP_BASE/fake-codex.log"
 BACKEND_LOG="$TMP_BASE/backend.log"
+RUNTIME_CONFIG_PATH="$TMP_BASE/runtime-config.json"
 
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]]; then
@@ -145,6 +146,7 @@ source "$ROOT_DIR/.venv/bin/activate"
 
 STASH_CODEX_MODE=cli \
 STASH_CODEX_BIN="$FAKE_CODEX" \
+STASH_RUNTIME_CONFIG_PATH="$RUNTIME_CONFIG_PATH" \
 STASH_TEST_CODEX_LOG="$FAKE_CODEX_LOG" \
 STASH_LOG_LEVEL=INFO \
 uvicorn stash_backend.main:app --host 127.0.0.1 --port 8788 >"$BACKEND_LOG" 2>&1 &

@@ -171,3 +171,32 @@ class TaskStatusResponse(BaseModel):
     message_id: str
     run_id: str | None = None
     status: str
+
+
+class RuntimeConfigResponse(BaseModel):
+    planner_backend: Literal["auto", "codex_cli", "openai_api"]
+    codex_mode: Literal["cli", "shell"]
+    codex_bin: str
+    codex_planner_model: str
+    planner_cmd: str | None = None
+    planner_timeout_seconds: int
+    openai_api_key_set: bool
+    openai_model: str
+    openai_base_url: str
+    openai_timeout_seconds: int
+    config_path: str
+
+
+class RuntimeConfigUpdateRequest(BaseModel):
+    planner_backend: Literal["auto", "codex_cli", "openai_api"] | None = None
+    codex_mode: Literal["cli", "shell"] | None = None
+    codex_bin: str | None = None
+    codex_planner_model: str | None = None
+    planner_cmd: str | None = None
+    clear_planner_cmd: bool = False
+    planner_timeout_seconds: int | None = Field(default=None, ge=20, le=600)
+    openai_api_key: str | None = None
+    clear_openai_api_key: bool = False
+    openai_model: str | None = None
+    openai_base_url: str | None = None
+    openai_timeout_seconds: int | None = Field(default=None, ge=5, le=300)

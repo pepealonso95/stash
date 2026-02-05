@@ -46,6 +46,63 @@ struct BackendClient {
         try await request(path: "/health", method: "GET", body: Optional<Int>.none)
     }
 
+    func runtimeConfig() async throws -> RuntimeConfigPayload {
+        try await request(path: "/v1/runtime/config", method: "GET", body: Optional<Int>.none)
+    }
+
+    func runtimeSetupStatus() async throws -> RuntimeSetupStatus {
+        try await request(path: "/v1/runtime/setup-status", method: "GET", body: Optional<Int>.none)
+    }
+
+    func updateRuntimeConfig(
+        plannerBackend: String,
+        codexMode: String,
+        codexBin: String,
+        codexPlannerModel: String,
+        plannerCmd: String?,
+        clearPlannerCmd: Bool,
+        plannerTimeoutSeconds: Int,
+        openaiAPIKey: String?,
+        clearOpenAIAPIKey: Bool,
+        openaiModel: String,
+        openaiBaseURL: String,
+        openaiTimeoutSeconds: Int
+    ) async throws -> RuntimeConfigPayload {
+        struct Payload: Encodable {
+            let plannerBackend: String
+            let codexMode: String
+            let codexBin: String
+            let codexPlannerModel: String
+            let plannerCmd: String?
+            let clearPlannerCmd: Bool
+            let plannerTimeoutSeconds: Int
+            let openaiApiKey: String?
+            let clearOpenaiApiKey: Bool
+            let openaiModel: String
+            let openaiBaseUrl: String
+            let openaiTimeoutSeconds: Int
+        }
+
+        return try await request(
+            path: "/v1/runtime/config",
+            method: "PATCH",
+            body: Payload(
+                plannerBackend: plannerBackend,
+                codexMode: codexMode,
+                codexBin: codexBin,
+                codexPlannerModel: codexPlannerModel,
+                plannerCmd: plannerCmd,
+                clearPlannerCmd: clearPlannerCmd,
+                plannerTimeoutSeconds: plannerTimeoutSeconds,
+                openaiApiKey: openaiAPIKey,
+                clearOpenaiApiKey: clearOpenAIAPIKey,
+                openaiModel: openaiModel,
+                openaiBaseUrl: openaiBaseURL,
+                openaiTimeoutSeconds: openaiTimeoutSeconds
+            )
+        )
+    }
+
     func createOrOpenProject(name: String, rootPath: String) async throws -> Project {
         struct Payload: Encodable {
             let name: String

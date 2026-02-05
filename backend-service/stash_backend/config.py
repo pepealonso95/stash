@@ -21,6 +21,7 @@ class Settings:
     openai_model: str = "gpt-5-mini"
     openai_base_url: str = "https://api.openai.com/v1"
     openai_timeout_seconds: int = 60
+    runtime_config_path: str | None = None
     log_level: str = "INFO"
     enable_hidden_files: bool = False
 
@@ -43,6 +44,7 @@ def load_settings() -> Settings:
         openai_model=os.getenv("STASH_OPENAI_MODEL", "gpt-5-mini").strip(),
         openai_base_url=os.getenv("STASH_OPENAI_BASE_URL", "https://api.openai.com/v1").strip(),
         openai_timeout_seconds=int(os.getenv("STASH_OPENAI_TIMEOUT_SECONDS", "60")),
+        runtime_config_path=(os.getenv("STASH_RUNTIME_CONFIG_PATH") or "").strip() or None,
         log_level=os.getenv("STASH_LOG_LEVEL", "INFO").strip().upper(),
         enable_hidden_files=os.getenv("STASH_ENABLE_HIDDEN_FILES", "false").strip().lower() == "true",
     )

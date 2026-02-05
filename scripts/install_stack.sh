@@ -5,10 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend-service"
 VENV_DIR="$ROOT_DIR/.venv"
 FRONTEND_CONFIG_PATH="${STASH_FRONTEND_CONFIG_PATH:-}"
-OPENAI_API_KEY_VALUE="${STASH_OPENAI_API_KEY:-${OPENAI_API_KEY:-}}"
-OPENAI_MODEL_VALUE="${STASH_OPENAI_MODEL:-gpt-5-mini}"
-OPENAI_BASE_URL_VALUE="${STASH_OPENAI_BASE_URL:-https://api.openai.com/v1}"
-OPENAI_TIMEOUT_VALUE="${STASH_OPENAI_TIMEOUT_SECONDS:-60}"
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required" >&2
@@ -21,25 +17,6 @@ source "$VENV_DIR/bin/activate"
 
 python -m pip install --upgrade pip
 python -m pip install -e "$BACKEND_DIR"
-
-cat > "$ROOT_DIR/.env.local" << ENV
-STASH_BACKEND_URL=http://127.0.0.1:8765
-STASH_CODEX_MODE=cli
-STASH_OPENAI_MODEL=$OPENAI_MODEL_VALUE
-STASH_OPENAI_BASE_URL=$OPENAI_BASE_URL_VALUE
-STASH_OPENAI_TIMEOUT_SECONDS=$OPENAI_TIMEOUT_VALUE
-ENV
-
-if [ -n "$OPENAI_API_KEY_VALUE" ]; then
-  cat >> "$ROOT_DIR/.env.local" << ENV
-STASH_OPENAI_API_KEY=$OPENAI_API_KEY_VALUE
-ENV
-else
-  cat >> "$ROOT_DIR/.env.local" << 'ENV'
-# Optional: set to enable GPT planner
-# STASH_OPENAI_API_KEY=<your_openai_api_key>
-ENV
-fi
 
 if [ -n "$FRONTEND_CONFIG_PATH" ]; then
   mkdir -p "$(dirname "$FRONTEND_CONFIG_PATH")"
@@ -56,4 +33,5 @@ if [ -n "$FRONTEND_CONFIG_PATH" ]; then
 else
   echo "- Frontend config: skipped (set STASH_FRONTEND_CONFIG_PATH to generate one)"
 fi
+echo "- Runtime setup: configure Codex/GPT inside the Stash app (AI Setup)"
 echo "- Run backend: ./scripts/run_backend.sh"

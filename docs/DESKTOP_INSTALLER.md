@@ -23,10 +23,10 @@ STASH_DESKTOP_TARGET_DIR="/Applications" \
 STASH_DESKTOP_APP_NAME="Stash Local.app" \
 STASH_BACKEND_URL="http://127.0.0.1:8765" \
 STASH_CODEX_MODE="cli" \
-STASH_OPENAI_API_KEY="<your_openai_api_key>" \
-STASH_OPENAI_MODEL="gpt-5-mini" \
 ./scripts/desktop/install_desktop_app.sh
 ```
+
+OpenAI/Codex planner settings are configured from the app UI in **AI Setup** after launch.
 
 ## App Icon
 

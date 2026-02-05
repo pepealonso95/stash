@@ -8,12 +8,14 @@ from .indexer import IndexingService
 from .orchestrator import RunOrchestrator
 from .planner import Planner
 from .project_store import ProjectStore
+from .runtime_config import RuntimeConfigStore
 from .watcher import WatcherService
 
 
 @dataclass
 class Services:
     settings: Settings
+    runtime_config: RuntimeConfigStore
     project_store: ProjectStore
     indexer: IndexingService
     watcher: WatcherService
@@ -23,10 +25,11 @@ class Services:
 
 
 def build_services(settings: Settings) -> Services:
+    runtime_config = RuntimeConfigStore(settings)
     project_store = ProjectStore()
     indexer = IndexingService(settings)
-    planner = Planner(settings)
-    codex = CodexExecutor(settings)
+    planner = Planner(settings, runtime_config_store=runtime_config)
+    codex = CodexExecutor(settings, runtime_config_store=runtime_config)
     watcher = WatcherService(
         project_store=project_store,
         indexer=indexer,
@@ -36,6 +39,7 @@ def build_services(settings: Settings) -> Services:
 
     return Services(
         settings=settings,
+        runtime_config=runtime_config,
         project_store=project_store,
         indexer=indexer,
         watcher=watcher,

@@ -133,6 +133,42 @@ struct APIErrorResponse: Decodable {
     let detail: String
 }
 
+struct RuntimeConfigPayload: Decodable {
+    let plannerBackend: String
+    let codexMode: String
+    let codexBin: String
+    let codexPlannerModel: String
+    let plannerCmd: String?
+    let plannerTimeoutSeconds: Int
+    let openaiApiKeySet: Bool
+    let openaiModel: String
+    let openaiBaseUrl: String
+    let openaiTimeoutSeconds: Int
+    let configPath: String
+}
+
+struct RuntimeSetupStatus: Decodable {
+    let plannerBackend: String
+    let codexMode: String
+    let codexBin: String
+    let codexBinResolved: String?
+    let codexAvailable: Bool
+    let loginChecked: Bool
+    let loginOk: Bool?
+    let detail: String?
+    let plannerCmdConfigured: Bool
+    let codexPlannerModel: String
+    let openaiApiKeySet: Bool
+    let openaiPlannerConfigured: Bool
+    let openaiModel: String
+    let openaiBaseUrl: String
+    let codexPlannerReady: Bool
+    let openaiPlannerReady: Bool
+    let gptViaCodexCliPossible: Bool
+    let plannerReady: Bool
+    let blockers: [String]
+}
+
 struct FileItem: Identifiable, Hashable {
     let id: String
     let relativePath: String
