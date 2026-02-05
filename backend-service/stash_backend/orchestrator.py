@@ -201,6 +201,9 @@ class RunOrchestrator:
 
                     try:
                         result = await asyncio.to_thread(self.codex.execute, context, command)
+                        stderr_excerpt = ((result.stderr or "").strip().splitlines() or [""])[0][:240]
+                        stdout_excerpt = ((result.stdout or "").strip().splitlines() or [""])[0][:240]
+                        failure_detail = stderr_excerpt or stdout_excerpt
                         output = {
                             "engine": result.engine,
                             "exit_code": result.exit_code,
@@ -217,11 +220,19 @@ class RunOrchestrator:
 
                         with context.lock:
                             repo.finish_run_step(step_id, status=status, output_data=output)
+                            event_payload: dict[str, Any] = {
+                                "step_id": step_id,
+                                "step_index": step_index,
+                                "status": status,
+                                "exit_code": result.exit_code,
+                            }
+                            if result.exit_code != 0 and failure_detail:
+                                event_payload["detail"] = failure_detail
                             repo.add_event(
                                 "run_step_completed",
                                 conversation_id=conversation_id,
                                 run_id=run_id,
-                                payload={"step_id": step_id, "step_index": step_index, "status": status},
+                                payload=event_payload,
                             )
                             repo.create_message(
                                 conversation_id,
@@ -237,7 +248,10 @@ class RunOrchestrator:
                                 metadata={"run_id": run_id, "step_index": step_index},
                             )
 
-                        tool_summaries.append(f"Step {step_index}: exit_code={result.exit_code}")
+                        summary = f"Step {step_index}: exit_code={result.exit_code}"
+                        if result.exit_code != 0 and failure_detail:
+                            summary += f" ({failure_detail})"
+                        tool_summaries.append(summary)
 
                     except (CodexCommandError, RuntimeError) as exc:
                         failures += 1

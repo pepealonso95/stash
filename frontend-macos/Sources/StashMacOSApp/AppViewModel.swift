@@ -23,7 +23,9 @@ final class AppViewModel: ObservableObject {
     @Published var indexingStatusText: String?
     @Published var runThinkingText: String?
     @Published var runPlanningText: String?
+    @Published var runPlannerPreview: String?
     @Published var runTodos: [RunTodo] = []
+    @Published var runFeedbackEvents: [RunFeedbackEvent] = []
     @Published var mentionSuggestions: [FileItem] = []
     @Published var mentionedFilePaths: [String] = []
     @Published var setupStatus: RuntimeSetupStatus?
@@ -46,6 +48,7 @@ final class AppViewModel: ObservableObject {
     @Published var errorText: String?
 
     private var runPollTask: Task<Void, Never>?
+    private var runEventStreamTask: Task<Void, Never>?
     private var filePollTask: Task<Void, Never>?
     private var indexStatusClearTask: Task<Void, Never>?
     private var lastFileSignature: Int?
@@ -56,12 +59,20 @@ final class AppViewModel: ObservableObject {
     private let changeIndexCooldownSeconds: TimeInterval = 4
     private let maxMentionedFiles = 6
     private let maxMentionExcerptChars = 3500
+    private let feedbackSourceFormatter = ISO8601DateFormatter()
+    private let feedbackClockFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
     private let defaults = UserDefaults.standard
     private let lastProjectPathKey = "stash.lastProjectPath"
     private let lastProjectBookmarkKey = "stash.lastProjectFolderBookmark"
     private let onboardingCompletedKey = "stash.onboardingCompletedV1"
     private let initialProjectRootURL: URL?
     private var activeSecurityScopedProjectURL: URL?
+    private var activeRunID: String?
+    private var lastRunEventID = 0
     private var client: BackendClient
 
     init(initialProjectRootURL: URL? = nil) {
@@ -72,6 +83,7 @@ final class AppViewModel: ObservableObject {
 
     deinit {
         runPollTask?.cancel()
+        runEventStreamTask?.cancel()
         filePollTask?.cancel()
         indexStatusClearTask?.cancel()
         if let activeSecurityScopedProjectURL {
@@ -104,6 +116,13 @@ final class AppViewModel: ObservableObject {
         return files.filter {
             $0.relativePath.localizedCaseInsensitiveContains(trimmed) ||
                 $0.name.localizedCaseInsensitiveContains(trimmed)
+        }
+    }
+
+    var visibleMessages: [Message] {
+        messages.filter {
+            let role = $0.role.lowercased()
+            return role == "user" || role == "assistant"
         }
     }
 
@@ -308,9 +327,10 @@ final class AppViewModel: ObservableObject {
             )
             project = opened
             projectRootURL = prepared.url
-            runThinkingText = nil
-            runPlanningText = nil
-            runTodos = []
+            runPollTask?.cancel()
+            stopRunEventStream()
+            activeRunID = nil
+            resetRunFeedback(clearEvents: true)
             rememberProjectSelection(url: prepared.url, bookmarkData: prepared.bookmarkData)
             activatePreparedAccess(prepared)
 
@@ -340,6 +360,25 @@ final class AppViewModel: ObservableObject {
 
         Task { await processDroppedFiles(providers: providers, toRelativeDirectory: relativeDirectory) }
         return true
+    }
+
+    func openFileItemInOS(_ item: FileItem) {
+        guard let projectRootURL else {
+            errorText = "Open a project folder first."
+            return
+        }
+
+        let itemURL = projectRootURL
+            .appendingPathComponent(item.relativePath)
+            .standardizedFileURL
+        guard FileManager.default.fileExists(atPath: itemURL.path) else {
+            errorText = "File no longer exists: \(item.relativePath)"
+            return
+        }
+
+        if !NSWorkspace.shared.open(itemURL) {
+            errorText = "Could not open in macOS: \(item.relativePath)"
+        }
     }
 
     private struct PreparedProjectAccess {
@@ -899,23 +938,232 @@ final class AppViewModel: ObservableObject {
 
     private func updateRunFeedback(run: RunDetail) {
         let steps = run.steps ?? []
-        if run.status.lowercased() == "running" {
-            runThinkingText = "Thinking and planning..."
-        } else if ["done", "failed", "cancelled"].contains(run.status.lowercased()) {
+        let status = run.status.lowercased()
+        if status == "running" {
+            if runThinkingText == nil {
+                runThinkingText = "Thinking and planning..."
+            }
+            if runPlanningText == nil {
+                runPlanningText = steps.isEmpty ? "Planning next actions..." : "Executing planned steps..."
+            }
+        } else if ["done", "failed", "cancelled"].contains(status) {
             runThinkingText = nil
         }
 
         if steps.isEmpty {
-            runPlanningText = run.status.lowercased() == "running" ? "Planning next actions..." : nil
-            runTodos = []
+            if status != "running", runTodos.isEmpty {
+                runPlanningText = nil
+            }
             return
         }
 
-        runPlanningText = "Planned \(steps.count) step(s)"
         runTodos = steps.map { step in
             let command = step.input["cmd"]?.stringValue ?? step.stepType
             return RunTodo(id: step.id, title: command, status: step.status)
         }
+        if status == "running" {
+            runPlanningText = "Planned \(steps.count) step(s)"
+        }
+    }
+
+    private func resetRunFeedback(clearEvents: Bool) {
+        runThinkingText = nil
+        runPlanningText = nil
+        runPlannerPreview = nil
+        runTodos = []
+        if clearEvents {
+            runFeedbackEvents = []
+            lastRunEventID = 0
+        }
+    }
+
+    private func appendRunFeedbackEvent(
+        type: String,
+        title: String,
+        detail: String? = nil,
+        timestampISO: String? = nil
+    ) {
+        let isoText = timestampISO ?? ISO8601DateFormatter().string(from: Date())
+        let displayTime: String
+        if let parsed = feedbackSourceFormatter.date(from: isoText) {
+            displayTime = feedbackClockFormatter.string(from: parsed)
+        } else {
+            displayTime = isoText
+        }
+
+        let event = RunFeedbackEvent(
+            id: "event-\(lastRunEventID)-\(runFeedbackEvents.count + 1)-\(UUID().uuidString)",
+            type: type,
+            title: title,
+            detail: detail,
+            timestamp: displayTime
+        )
+        runFeedbackEvents.append(event)
+        if runFeedbackEvents.count > 120 {
+            runFeedbackEvents.removeFirst(runFeedbackEvents.count - 120)
+        }
+    }
+
+    private func sanitizePlannerPreview(_ raw: String) -> String {
+        guard !raw.isEmpty else {
+            return ""
+        }
+        guard let regex = try? NSRegularExpression(
+            pattern: "<codex_cmd(?:\\s+[^>]*)?>[\\s\\S]*?<\\/codex_cmd>",
+            options: [.caseInsensitive]
+        ) else {
+            return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let nsRange = NSRange(raw.startIndex ..< raw.endIndex, in: raw)
+        let stripped = regex.stringByReplacingMatches(in: raw, options: [], range: nsRange, withTemplate: "")
+        return stripped
+            .replacingOccurrences(of: "\n\n\n", with: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func updateTodoStatus(stepIndex: Int, status: String, fallbackTitle: String? = nil) {
+        guard stepIndex > 0 else { return }
+        let index = stepIndex - 1
+        if index < runTodos.count {
+            let existing = runTodos[index]
+            runTodos[index] = RunTodo(id: existing.id, title: existing.title, status: status)
+            return
+        }
+        let title = fallbackTitle ?? "Step \(stepIndex)"
+        runTodos.append(RunTodo(id: "step-\(stepIndex)", title: title, status: status))
+    }
+
+    private func applyRunEvent(_ event: ProjectEvent, expectedRunID: String) {
+        lastRunEventID = max(lastRunEventID, event.id)
+
+        guard activeRunID == expectedRunID else { return }
+        guard event.runId == nil || event.runId == expectedRunID else { return }
+
+        switch event.type {
+        case "run_started":
+            runThinkingText = "Thinking and planning..."
+            runPlanningText = "Gathering indexed context..."
+            appendRunFeedbackEvent(
+                type: "status",
+                title: "Run started",
+                detail: nil,
+                timestampISO: event.ts
+            )
+
+        case "run_planned":
+            let commandCount = event.payload["command_count"]?.intValue ?? 0
+            let ragHitCount = event.payload["rag_hit_count"]?.intValue ?? 0
+            let plannerPreview = sanitizePlannerPreview(event.payload["planner_preview"]?.stringValue ?? "")
+            runPlannerPreview = plannerPreview.isEmpty ? nil : plannerPreview
+            if let commands = event.payload["commands"]?.stringArrayValue, !commands.isEmpty {
+                runTodos = commands.enumerated().map { index, command in
+                    RunTodo(id: "planned-\(index + 1)", title: command, status: "pending")
+                }
+            }
+            runThinkingText = "Plan generated"
+            runPlanningText = commandCount > 0 ? "Executing \(commandCount) planned step(s)..." : "No runnable steps in plan."
+            appendRunFeedbackEvent(
+                type: "planning",
+                title: "Plan ready",
+                detail: "Commands: \(max(commandCount, runTodos.count)) • Indexed hits: \(ragHitCount)",
+                timestampISO: event.ts
+            )
+
+        case "run_step_started":
+            let stepIndex = event.payload["step_index"]?.intValue ?? 0
+            if stepIndex > 0 {
+                updateTodoStatus(stepIndex: stepIndex, status: "running")
+            }
+            let stepTitle: String?
+            if stepIndex > 0, stepIndex - 1 < runTodos.count {
+                stepTitle = runTodos[stepIndex - 1].title
+            } else {
+                stepTitle = nil
+            }
+            appendRunFeedbackEvent(
+                type: "execution",
+                title: stepIndex > 0 ? "Step \(stepIndex) started" : "Step started",
+                detail: stepTitle,
+                timestampISO: event.ts
+            )
+
+        case "run_step_completed":
+            let stepIndex = event.payload["step_index"]?.intValue ?? 0
+            let status = (event.payload["status"]?.stringValue ?? "completed").lowercased()
+            if stepIndex > 0 {
+                updateTodoStatus(stepIndex: stepIndex, status: status)
+            }
+            let errorDetail = event.payload["error"]?.stringValue
+            let runtimeDetail = event.payload["detail"]?.stringValue
+            let exitCode = event.payload["exit_code"]?.intValue
+            let detail = errorDetail ?? runtimeDetail ?? (exitCode != nil ? "exit_code=\(exitCode ?? 0)" : nil)
+            appendRunFeedbackEvent(
+                type: status == "failed" ? "error" : "execution",
+                title: stepIndex > 0 ? "Step \(stepIndex) \(status)" : "Step \(status)",
+                detail: detail,
+                timestampISO: event.ts
+            )
+
+        case "run_completed":
+            runThinkingText = nil
+            runPlanningText = "Run completed."
+            appendRunFeedbackEvent(type: "status", title: "Run completed", detail: nil, timestampISO: event.ts)
+
+        case "run_failed":
+            runThinkingText = nil
+            runPlanningText = "Run failed."
+            let failures = event.payload["failures"]?.intValue
+            let detail = failures != nil ? "\(failures ?? 0) step(s) failed" : nil
+            appendRunFeedbackEvent(type: "error", title: "Run failed", detail: detail, timestampISO: event.ts)
+
+        case "run_cancelled":
+            runThinkingText = nil
+            runPlanningText = "Run cancelled."
+            appendRunFeedbackEvent(type: "status", title: "Run cancelled", detail: nil, timestampISO: event.ts)
+
+        default:
+            break
+        }
+    }
+
+    private func startRunEventStream(projectID: String, conversationID: String, runID: String) {
+        runEventStreamTask?.cancel()
+        runEventStreamTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            while !Task.isCancelled, self.activeRunID == runID {
+                do {
+                    try await self.client.streamEvents(
+                        projectID: projectID,
+                        conversationID: conversationID,
+                        sinceID: self.lastRunEventID
+                    ) { event in
+                        Task { @MainActor [weak self] in
+                            self?.applyRunEvent(event, expectedRunID: runID)
+                        }
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard self.activeRunID == runID, self.runInProgress else {
+                        return
+                    }
+                    self.appendRunFeedbackEvent(
+                        type: "status",
+                        title: "Live feed reconnecting...",
+                        detail: error.localizedDescription
+                    )
+                    try? await Task.sleep(for: .seconds(1))
+                }
+
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+
+    private func stopRunEventStream() {
+        runEventStreamTask?.cancel()
+        runEventStreamTask = nil
     }
 
     func sendComposerMessage() async {
@@ -946,9 +1194,10 @@ final class AppViewModel: ObservableObject {
         }
 
         let mentionParts = buildMentionParts(from: content)
+        resetRunFeedback(clearEvents: true)
         runThinkingText = "Thinking and planning..."
-        runPlanningText = "Planning next actions..."
-        runTodos = []
+        runPlanningText = "Waiting for planner..."
+        appendRunFeedbackEvent(type: "status", title: "Prompt sent", detail: "Starting run...")
         let optimisticID = "local-\(UUID().uuidString)"
         let optimisticMessage = Message(
             id: optimisticID,
@@ -991,13 +1240,19 @@ final class AppViewModel: ObservableObject {
 
     private func pollRun(projectID: String, conversationID: String, runID: String) async {
         runPollTask?.cancel()
+        stopRunEventStream()
+        activeRunID = runID
+        lastRunEventID = 0
         runInProgress = true
         runStatusText = "Running..."
+        startRunEventStream(projectID: projectID, conversationID: conversationID, runID: runID)
 
         runPollTask = Task {
             defer {
                 Task { @MainActor in
                     self.runInProgress = false
+                    self.stopRunEventStream()
+                    self.activeRunID = nil
                 }
             }
 
@@ -1021,8 +1276,8 @@ final class AppViewModel: ObservableObject {
                 } catch {
                     await MainActor.run {
                         self.runThinkingText = nil
-                        self.runPlanningText = nil
-                        self.runTodos = []
+                        self.runPlanningText = "Run polling failed."
+                        self.appendRunFeedbackEvent(type: "error", title: "Run polling failed", detail: error.localizedDescription)
                         self.errorText = "Run polling failed: \(error.localizedDescription)"
                     }
                     return
@@ -1034,6 +1289,8 @@ final class AppViewModel: ObservableObject {
             await MainActor.run {
                 self.runStatusText = "Run timed out"
                 self.runThinkingText = nil
+                self.runPlanningText = "Run timed out."
+                self.appendRunFeedbackEvent(type: "error", title: "Run timed out", detail: nil)
             }
         }
     }

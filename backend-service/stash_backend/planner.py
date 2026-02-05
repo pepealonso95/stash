@@ -51,6 +51,7 @@ READ_HINT_KEYWORDS = (
 )
 
 FILE_REF_RE = re.compile(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,12}")
+CODEX_CMD_BLOCK_RE = re.compile(r"<codex_cmd(?:\s+[^>]*)?>[\s\S]*?</codex_cmd>", flags=re.IGNORECASE)
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,11 @@ class Planner:
             return None
         return "\n\n".join(chunks)
 
+    def _strip_codex_cmd_blocks(self, text: str) -> str:
+        stripped = CODEX_CMD_BLOCK_RE.sub("", text)
+        stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+        return stripped.strip()
+
     def _build_planner_prompt(
         self,
         *,
@@ -159,7 +165,7 @@ class Planner:
         normalized_history = [
             {
                 "role": item.get("role"),
-                "content": str(item.get("content", ""))[:max_history_content_chars],
+                "content": self._strip_codex_cmd_blocks(str(item.get("content", "")))[:max_history_content_chars],
                 "created_at": item.get("created_at"),
             }
             for item in conversation_history[-max_history_items:]
@@ -189,6 +195,7 @@ class Planner:
             "- Use at most 8 commands.\n"
             "- One shell command per block.\n"
             f"- Allowed command prefixes only: {allowed_prefixes}.\n"
+            "- Prefer direct python/python3 commands with already-installed packages; avoid `uv run --with ...` unless the user explicitly asks for uv-managed ephemeral dependencies.\n"
             "- Never use sudo, rm -rf, git reset --hard, or destructive commands.\n"
             f"- For changes intended to affect project files, set cwd to this exact project root path: {project_root}.\n"
             "- Keep commands inside the project/worktree context.\n"
