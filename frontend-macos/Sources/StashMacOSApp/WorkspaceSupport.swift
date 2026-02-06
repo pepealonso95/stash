@@ -163,10 +163,84 @@ enum TextFileDecoder {
 
 enum CSVCodec {
     static func parse(_ content: String) -> [[String]] {
-        if content.isEmpty {
+        let sanitized = normalizeInput(content)
+        if sanitized.isEmpty {
             return [[""]]
         }
 
+        let delimiter = detectDelimiter(in: sanitized)
+        let primary = parseCore(sanitized, delimiter: delimiter)
+        if primary.rows.count > 1 {
+            return primary.rows
+        }
+
+        // If robust quoted parsing collapses to one row but the raw text has line breaks,
+        // fall back to line-wise parsing so users still get a usable grid.
+        if containsLineBreaks(sanitized) {
+            let fallback = parseLineByLine(sanitized, delimiter: delimiter)
+            if fallback.count > 1 {
+                return fallback
+            }
+        }
+
+        if primary.rows.isEmpty {
+            return [[""]]
+        }
+        return primary.rows
+    }
+
+    static func encode(_ rows: [[String]]) -> String {
+        rows
+            .map { row in
+                row.map(escapeCell).joined(separator: ",")
+            }
+            .joined(separator: "\n")
+    }
+
+    private static func escapeCell(_ cell: String) -> String {
+        let escaped = cell.replacingOccurrences(of: "\"", with: "\"\"")
+        let needsQuotes = escaped.contains(",") || escaped.contains("\n") || escaped.contains("\r") || escaped.contains("\"")
+        if needsQuotes {
+            return "\"\(escaped)\""
+        }
+        return escaped
+    }
+
+    private static func normalizeInput(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\u{0000}", with: "")
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{2028}", with: "\n")
+            .replacingOccurrences(of: "\u{2029}", with: "\n")
+            .replacingOccurrences(of: "\u{0085}", with: "\n")
+    }
+
+    private static func containsLineBreaks(_ value: String) -> Bool {
+        value.contains("\n")
+    }
+
+    private static func detectDelimiter(in content: String) -> Character {
+        guard let firstLine = content.split(separator: "\n", omittingEmptySubsequences: false).first else {
+            return ","
+        }
+
+        let candidates: [Character] = [",", ";", "\t", "|"]
+        var best: Character = ","
+        var bestScore = -1
+        let line = String(firstLine)
+
+        for candidate in candidates {
+            let score = line.filter { $0 == candidate }.count
+            if score > bestScore {
+                best = candidate
+                bestScore = score
+            }
+        }
+        return best
+    }
+
+    private static func parseCore(_ content: String, delimiter: Character) -> (rows: [[String]], endedInQuotes: Bool) {
         var rows: [[String]] = []
         var row: [String] = []
         var cell = ""
@@ -189,27 +263,17 @@ enum CSVCodec {
                     cell.append(char)
                 }
             } else {
-                switch char {
-                case "\"":
+                if char == "\"" {
                     inQuotes = true
-                case ",":
+                } else if char == delimiter {
                     row.append(cell)
                     cell = ""
-                case "\n":
-                    row.append(cell)
-                    rows.append(row)
-                    row = []
-                    cell = ""
-                case "\r":
+                } else if char == "\n" {
                     row.append(cell)
                     rows.append(row)
                     row = []
                     cell = ""
-                    let next = content.index(after: index)
-                    if next < content.endIndex, content[next] == "\n" {
-                        index = next
-                    }
-                default:
+                } else {
                     cell.append(char)
                 }
             }
@@ -217,31 +281,53 @@ enum CSVCodec {
             index = content.index(after: index)
         }
 
-        if !row.isEmpty || !cell.isEmpty || content.hasSuffix(",") {
+        if !row.isEmpty || !cell.isEmpty || content.last == delimiter {
             row.append(cell)
             rows.append(row)
         }
 
         if rows.isEmpty {
-            return [[""]]
+            rows = [[""]]
         }
-        return rows
+        return (rows, inQuotes)
     }
 
-    static func encode(_ rows: [[String]]) -> String {
-        rows
-            .map { row in
-                row.map(escapeCell).joined(separator: ",")
+    private static func parseLineByLine(_ content: String, delimiter: Character) -> [[String]] {
+        let lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let parsed = lines.map { parseSingleLine($0, delimiter: delimiter) }
+        return parsed.isEmpty ? [[""]] : parsed
+    }
+
+    private static func parseSingleLine(_ line: String, delimiter: Character) -> [String] {
+        var cells: [String] = []
+        var cell = ""
+        var inQuotes = false
+        var index = line.startIndex
+        while index < line.endIndex {
+            let char = line[index]
+            if inQuotes {
+                if char == "\"" {
+                    let next = line.index(after: index)
+                    if next < line.endIndex, line[next] == "\"" {
+                        cell.append("\"")
+                        index = next
+                    } else {
+                        inQuotes = false
+                    }
+                } else {
+                    cell.append(char)
+                }
+            } else if char == "\"" {
+                inQuotes = true
+            } else if char == delimiter {
+                cells.append(cell)
+                cell = ""
+            } else {
+                cell.append(char)
             }
-            .joined(separator: "\n")
-    }
-
-    private static func escapeCell(_ cell: String) -> String {
-        let escaped = cell.replacingOccurrences(of: "\"", with: "\"\"")
-        let needsQuotes = escaped.contains(",") || escaped.contains("\n") || escaped.contains("\r") || escaped.contains("\"")
-        if needsQuotes {
-            return "\"\(escaped)\""
+            index = line.index(after: index)
         }
-        return escaped
+        cells.append(cell)
+        return cells
     }
 }

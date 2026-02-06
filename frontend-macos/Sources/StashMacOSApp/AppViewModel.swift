@@ -457,6 +457,37 @@ final class AppViewModel: ObservableObject {
         scheduleAutosave(relativePath: relativePath)
     }
 
+    func csvRowsForDisplay(relativePath: String) -> [[String]] {
+        let bufferText = documentBuffers[relativePath]?.content ?? ""
+        let parsedBufferRows = CSVCodec.parse(bufferText)
+        if parsedBufferRows.count > 1 {
+            return parsedBufferRows
+        }
+
+        guard let projectRootURL else {
+            return parsedBufferRows
+        }
+
+        let itemURL = projectRootURL.appendingPathComponent(relativePath).standardizedFileURL
+        guard let diskData = try? Data(contentsOf: itemURL) else {
+            return parsedBufferRows
+        }
+
+        let decoded = TextFileDecoder.decode(data: diskData, forceText: true)
+        let diskRows = CSVCodec.parse(decoded.text)
+        guard diskRows.count > parsedBufferRows.count else {
+            return parsedBufferRows
+        }
+
+        if var buffer = documentBuffers[relativePath], !buffer.isDirty {
+            buffer.content = decoded.text
+            buffer.lastSavedContent = decoded.text
+            buffer.isBinary = decoded.isBinary
+            documentBuffers[relativePath] = buffer
+        }
+        return diskRows
+    }
+
     func saveBuffer(relativePath: String) {
         guard let projectRootURL else { return }
         guard var buffer = documentBuffers[relativePath], buffer.isDirty else { return }

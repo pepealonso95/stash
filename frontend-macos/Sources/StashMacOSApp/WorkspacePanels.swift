@@ -614,11 +614,11 @@ struct WorkspacePanel: View {
     }
 
     private func csvGrid(relativePath: String) -> some View {
-        let rows = CSVCodec.parse(viewModel.documentBuffers[relativePath]?.content ?? "")
+        let rows = viewModel.csvRowsForDisplay(relativePath: relativePath)
         let maxColumns = max(rows.map(\.count).max() ?? 0, 1)
 
         return ScrollView([.vertical, .horizontal]) {
-            VStack(alignment: .leading, spacing: 0) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(rows.indices, id: \.self) { rowIndex in
                     HStack(spacing: 0) {
                         ForEach(0 ..< maxColumns, id: \.self) { columnIndex in
@@ -655,6 +655,7 @@ struct WorkspacePanel: View {
                 }
             }
             .padding(8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .background(CodexTheme.canvas)
     }

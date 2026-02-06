@@ -130,6 +130,34 @@ final class WorkspaceCoreTests: XCTestCase {
         XCTAssertEqual(viewModel.documentBuffers["notes.md"]?.isDirty, false)
     }
 
+    @MainActor
+    func testCSVRowsForDisplayRecoversFromCollapsedBuffer() throws {
+        let temp = try makeTempProject()
+        defer { try? FileManager.default.removeItem(at: temp) }
+
+        let csvPath = "data.csv"
+        let csvText = "date,amount\n2026-01-01,12.50\n2026-01-02,22.00"
+        try csvText.write(to: temp.appendingPathComponent(csvPath), atomically: true, encoding: .utf8)
+
+        let viewModel = AppViewModel()
+        viewModel.project = Project(id: "proj-csv", name: "proj-csv", rootPath: temp.path, createdAt: nil, lastOpenedAt: nil, activeConversationId: nil)
+        viewModel.projectRootURL = temp
+        viewModel.files = FileScanner.scan(rootURL: temp)
+        viewModel.openFile(relativePath: csvPath, mode: .preview)
+
+        var collapsed = viewModel.documentBuffers[csvPath]
+        collapsed?.content = "date,amount"
+        collapsed?.lastSavedContent = "date,amount"
+        if let collapsed {
+            viewModel.documentBuffers[csvPath] = collapsed
+        }
+
+        let rows = viewModel.csvRowsForDisplay(relativePath: csvPath)
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertEqual(rows[1], ["2026-01-01", "12.50"])
+        XCTAssertTrue(viewModel.documentBuffers[csvPath]?.content.contains("2026-01-02,22.00") == true)
+    }
+
     private func makeTempProject() throws -> URL {
         let base = FileManager.default.temporaryDirectory
         let url = base.appendingPathComponent("stash-tests-\(UUID().uuidString)", isDirectory: true)
