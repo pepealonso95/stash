@@ -36,6 +36,9 @@ class ProjectStore:
 
         existing = self.get_by_root(root)
         if existing is not None:
+            # Touch last_opened_at when the project is opened again so "most recent"
+            # selection (overlay drops, quick resume) follows the main UI.
+            ProjectRepository(existing).update_project()
             return existing
 
         permission = inspect_permissions(root)

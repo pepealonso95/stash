@@ -7,10 +7,11 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     private let viewModel: OverlayViewModel
     private let panel: OverlayPanel
     private var projectPopover: NSPopover?
-    private var workspaceWindowControllers: [String: ProjectWorkspaceWindowController] = [:]
     private var shouldPresentProjectPickerOnActivate = false
     private var didPromptForAccessibility = false
     private var attachedDocumentKeys: Set<String> = []
+    private var workspaceWindowControllers: [String: ProjectWorkspaceWindowController] = [:]
+    private var activeWorkspaceProjectID: String?
 
     init(viewModel: OverlayViewModel) {
         self.viewModel = viewModel
@@ -71,8 +72,10 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         viewModel.isActive = true
         guard shouldPresentProjectPickerOnActivate else { return }
         shouldPresentProjectPickerOnActivate = false
-        DispatchQueue.main.async { [weak self] in
-            self?.presentProjectPickerPopover()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.synchronizeSelectedProjectWithGlobalActive()
+            self.presentProjectPickerPopover()
         }
     }
 
@@ -119,10 +122,11 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         panel.makeKeyAndOrderFront(nil)
         shouldPresentProjectPickerOnActivate = false
         NSApp.activate(ignoringOtherApps: true)
+        await synchronizeSelectedProjectWithGlobalActive()
 
         do {
-            let project = try await viewModel.backendClient.ensureProjectSelection(
-                preferredProjectID: viewModel.selectedProject?.id
+            let project = try await viewModel.backendClient.resolveDropTargetProject(
+                preferredProjectID: activeWorkspaceProjectID
             )
             projectPopover?.performClose(nil)
             openWorkspaceWindow(for: project)
@@ -145,7 +149,11 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     @MainActor
     private func handleOverlayInteraction() {
         if panel.isKeyWindow {
-            presentProjectPickerPopover()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.synchronizeSelectedProjectWithGlobalActive()
+                self.presentProjectPickerPopover()
+            }
             return
         }
 
@@ -162,6 +170,9 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
 
         maybePromptForAccessibilityAccess()
         shouldPresentProjectPickerOnActivate = true
+        Task { @MainActor [weak self] in
+            await self?.synchronizeSelectedProjectWithGlobalActive()
+        }
     }
 
     @MainActor
@@ -199,7 +210,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     @MainActor
     private func openWorkspaceWindow(for project: OverlayProject) {
         viewModel.selectedProject = project
-
+        closeWorkspaceWindows(exceptProjectID: project.id)
         if let existing = workspaceWindowControllers[project.id] {
             existing.showWindow(nil)
             existing.window?.makeKeyAndOrderFront(nil)
@@ -207,22 +218,44 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
             return
         }
 
-        let controller = ProjectWorkspaceWindowController(project: project)
+        let controller = ProjectWorkspaceWindowController(
+            project: project,
+            backendURL: viewModel.backendClient.backendURL
+        )
+        controller.onWindowFocused = { [weak self] projectID in
+            self?.activeWorkspaceProjectID = projectID
+            Task { [weak self] in
+                try? await self?.viewModel.backendClient.setActiveProject(projectID: projectID)
+            }
+        }
         controller.onWindowClosed = { [weak self] projectID in
-            self?.workspaceWindowControllers.removeValue(forKey: projectID)
+            guard let self else { return }
+            self.workspaceWindowControllers.removeValue(forKey: projectID)
+            if self.activeWorkspaceProjectID == projectID {
+                self.activeWorkspaceProjectID = nil
+            }
         }
         workspaceWindowControllers[project.id] = controller
+        activeWorkspaceProjectID = project.id
+        Task { [weak self] in
+            try? await self?.viewModel.backendClient.setActiveProject(projectID: project.id)
+        }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     @MainActor
+    private func closeWorkspaceWindows(exceptProjectID keepProjectID: String) {
+        for (projectID, controller) in workspaceWindowControllers where projectID != keepProjectID {
+            controller.window?.performClose(nil)
+        }
+    }
+
+    @MainActor
     private func processDetectedDocumentInteraction(_ detectedDocument: DetectedDocumentContext) async {
         do {
-            let project = try await viewModel.backendClient.ensureProjectSelection(
-                preferredProjectID: viewModel.selectedProject?.id
-            )
+            let project = try await viewModel.backendClient.ensureMostRecentlyOpenedProject()
             projectPopover?.performClose(nil)
             openWorkspaceWindow(for: project)
 
@@ -248,6 +281,20 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     private func makeAttachmentKey(projectID: String, documentURL: URL) -> String {
         "\(projectID)|\(documentURL.standardizedFileURL.path)"
     }
+
+    @MainActor
+    private func synchronizeSelectedProjectWithGlobalActive() async {
+        do {
+            let synced = try await viewModel.backendClient.resolveDropTargetProject(
+                preferredProjectID: activeWorkspaceProjectID
+            )
+            viewModel.selectedProject = synced
+            activeWorkspaceProjectID = synced.id
+        } catch {
+            // Ignore sync errors here; selection resolution will retry on demand.
+        }
+    }
+
     private struct ImportedDropResult {
         var urls: [URL]
         var failures: [String]
@@ -300,22 +347,19 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
             throw CocoaError(.fileWriteNoPermission)
         }
 
-        let sourceInsideProject = isInsideProject(source, root: projectRoot)
-        if sourceInsideProject {
-            if source.standardizedFileURL == destination.standardizedFileURL {
-                return destination
-            }
-            if isDescendant(destination, of: source) {
-                throw NSError(
-                    domain: NSCocoaErrorDomain,
-                    code: NSFeatureUnsupportedError,
-                    userInfo: [NSLocalizedDescriptionKey: "Cannot move a folder into itself."]
-                )
-            }
-            try fm.moveItem(at: source, to: destination)
+        if source.standardizedFileURL == destination.standardizedFileURL {
             return destination
         }
 
+        if isDescendant(destination, of: source) {
+            throw NSError(
+                domain: NSCocoaErrorDomain,
+                code: NSFeatureUnsupportedError,
+                userInfo: [NSLocalizedDescriptionKey: "Cannot copy a folder into itself."]
+            )
+        }
+
+        // Deep copy semantics for dropped items: preserve source.
         try fm.copyItem(at: source, to: destination)
         return destination
     }

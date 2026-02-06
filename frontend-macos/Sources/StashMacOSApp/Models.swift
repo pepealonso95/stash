@@ -212,11 +212,16 @@ struct RuntimeConfigPayload: Decodable {
     let codexPlannerModel: String
     let plannerCmd: String?
     let plannerTimeoutSeconds: Int
+    let activeProjectId: String?
     let openaiApiKeySet: Bool
     let openaiModel: String
     let openaiBaseUrl: String
     let openaiTimeoutSeconds: Int
     let configPath: String
+}
+
+struct ActiveProjectPayload: Decodable {
+    let activeProjectId: String?
 }
 
 struct RuntimeSetupStatus: Decodable {

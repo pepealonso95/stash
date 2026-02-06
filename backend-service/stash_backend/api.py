@@ -11,6 +11,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from .db import ProjectRepository
 from .integrations import codex_integration_status
 from .schemas import (
+    ActiveProjectResponse,
+    ActiveProjectUpdateRequest,
     AssetCreateRequest,
     AssetResponse,
     CodexExecuteRequest,
@@ -93,6 +95,8 @@ def create_app(services: Services) -> FastAPI:
             execution_mode=request.execution_mode,
             execution_parallel_reads_enabled=request.execution_parallel_reads_enabled,
             execution_parallel_reads_max_workers=request.execution_parallel_reads_max_workers,
+            active_project_id=request.active_project_id,
+            clear_active_project_id=request.clear_active_project_id,
             openai_api_key=request.openai_api_key,
             clear_openai_api_key=request.clear_openai_api_key,
             openai_model=request.openai_model,
@@ -100,6 +104,22 @@ def create_app(services: Services) -> FastAPI:
             openai_timeout_seconds=request.openai_timeout_seconds,
         )
         return RuntimeConfigResponse(**services.runtime_config.public_view())
+
+    @app.get("/v1/runtime/active-project", response_model=ActiveProjectResponse)
+    async def get_active_project() -> ActiveProjectResponse:
+        cfg = services.runtime_config.get()
+        return ActiveProjectResponse(active_project_id=cfg.active_project_id)
+
+    @app.put("/v1/runtime/active-project", response_model=ActiveProjectResponse)
+    async def put_active_project(request: ActiveProjectUpdateRequest) -> ActiveProjectResponse:
+        project_id = request.project_id.strip() if request.project_id else None
+        if project_id and services.project_store.get(project_id) is None:
+            raise HTTPException(status_code=404, detail="Project not loaded")
+        services.runtime_config.update(
+            active_project_id=project_id,
+            clear_active_project_id=not bool(project_id),
+        )
+        return ActiveProjectResponse(active_project_id=project_id)
 
     @app.get("/v1/runtime/setup-status")
     async def runtime_setup_status() -> dict[str, Any]:
@@ -119,6 +139,7 @@ def create_app(services: Services) -> FastAPI:
             repo.create_conversation("General")
 
         services.watcher.ensure_project_watch(context.project_id)
+        services.runtime_config.update(active_project_id=context.project_id)
 
         project = repo.project_view()
         project["permission"] = asdict(context.permission) if context.permission else None

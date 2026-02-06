@@ -10,7 +10,7 @@ final class FileDropDelegate: DropDelegate {
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        info.hasItemsConforming(to: [UTType.fileURL])
+        info.hasItemsConforming(to: [UTType.fileURL, UTType.folder])
     }
 
     func dropEntered(info: DropInfo) {
@@ -23,7 +23,7 @@ final class FileDropDelegate: DropDelegate {
 
     func performDrop(info: DropInfo) -> Bool {
         viewModel.isDragTarget = false
-        let providers = info.itemProviders(for: [UTType.fileURL])
+        let providers = info.itemProviders(for: [UTType.fileURL, UTType.folder])
         guard !providers.isEmpty else { return false }
 
         let group = DispatchGroup()
@@ -32,19 +32,12 @@ final class FileDropDelegate: DropDelegate {
 
         for provider in providers {
             group.enter()
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+            loadURL(from: provider, typeIdentifiers: [UTType.fileURL.identifier, UTType.folder.identifier]) { url in
                 defer { group.leave() }
-                guard error == nil else { return }
-
-                if let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) {
-                    lock.lock()
-                    urls.append(url)
-                    lock.unlock()
-                } else if let url = item as? URL {
-                    lock.lock()
-                    urls.append(url)
-                    lock.unlock()
-                }
+                guard let url else { return }
+                lock.lock()
+                urls.append(url)
+                lock.unlock()
             }
         }
 
@@ -54,5 +47,32 @@ final class FileDropDelegate: DropDelegate {
         }
 
         return true
+    }
+
+    private func loadURL(from provider: NSItemProvider, typeIdentifiers: [String], completion: @escaping (URL?) -> Void) {
+        func attempt(_ index: Int) {
+            guard index < typeIdentifiers.count else {
+                completion(nil)
+                return
+            }
+
+            provider.loadItem(forTypeIdentifier: typeIdentifiers[index], options: nil) { item, _error in
+                if let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) {
+                    completion(url)
+                    return
+                }
+                if let url = item as? URL {
+                    completion(url)
+                    return
+                }
+                if let string = item as? String, let url = URL(string: string) {
+                    completion(url)
+                    return
+                }
+                attempt(index + 1)
+            }
+        }
+
+        attempt(0)
     }
 }

@@ -135,9 +135,11 @@ final class ProjectPickerViewModel: ObservableObject {
 
     private func suggestedRootPath(for projectName: String) -> String {
         let baseDirectory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("StashProjects", isDirectory: true)
+            .appendingPathComponent("Documents", isDirectory: true)
+            .appendingPathComponent("Stash Projects", isDirectory: true)
         let slug = projectFolderSlug(for: projectName)
-        return baseDirectory.appendingPathComponent(slug, isDirectory: true).path
+        let baseCandidate = baseDirectory.appendingPathComponent(slug, isDirectory: true)
+        return uniqueProjectFolderPath(startingAt: baseCandidate).path
     }
 
     private func projectFolderSlug(for name: String) -> String {
@@ -146,6 +148,25 @@ final class ProjectPickerViewModel: ObservableObject {
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
         return parts.isEmpty ? "project" : parts.joined(separator: "-")
+    }
+
+    private func uniqueProjectFolderPath(startingAt candidate: URL) -> URL {
+        let fm = FileManager.default
+        let existingRoots = Set(projects.map(\.rootPath))
+        if !existingRoots.contains(candidate.path), !fm.fileExists(atPath: candidate.path) {
+            return candidate
+        }
+
+        let parent = candidate.deletingLastPathComponent()
+        let name = candidate.lastPathComponent
+        for index in 2 ... 999 {
+            let next = parent.appendingPathComponent("\(name)-\(index)", isDirectory: true)
+            if !existingRoots.contains(next.path), !fm.fileExists(atPath: next.path) {
+                return next
+            }
+        }
+
+        return parent.appendingPathComponent("\(name)-\(UUID().uuidString.prefix(8))", isDirectory: true)
     }
 }
 

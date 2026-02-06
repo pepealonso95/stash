@@ -36,6 +36,21 @@ find_frontend_release_binary() {
   printf '%s' "$candidate"
 }
 
+find_overlay_release_binary() {
+  local candidate
+  candidate=""
+
+  if [ -x "$ROOT_DIR/frontend-macos/.build/release/StashOverlay" ]; then
+    candidate="$ROOT_DIR/frontend-macos/.build/release/StashOverlay"
+  fi
+
+  if [ -z "$candidate" ]; then
+    candidate="$(find "$ROOT_DIR/frontend-macos/.build" -type f -name 'StashOverlay' -perm -u+x 2>/dev/null | grep '/release/' | head -n 1 || true)"
+  fi
+
+  printf '%s' "$candidate"
+}
+
 resolve_codex_binary() {
   if [ -n "${STASH_CODEX_BIN:-}" ] && [ -x "${STASH_CODEX_BIN:-}" ]; then
     printf '%s' "${STASH_CODEX_BIN:-}"
@@ -106,6 +121,7 @@ log "Building frontend release binary"
 (
   cd "$ROOT_DIR/frontend-macos"
   swift build -c release --product StashMacOSApp
+  swift build -c release --product StashOverlay
 )
 
 if [ -f "$ICON_SOURCE" ]; then
@@ -116,8 +132,13 @@ else
 fi
 
 FRONTEND_BIN="$(find_frontend_release_binary)"
+OVERLAY_BIN="$(find_overlay_release_binary)"
 if [ -z "$FRONTEND_BIN" ] || [ ! -x "$FRONTEND_BIN" ]; then
   echo "Could not locate built frontend binary." >&2
+  exit 1
+fi
+if [ -z "$OVERLAY_BIN" ] || [ ! -x "$OVERLAY_BIN" ]; then
+  echo "Could not locate built overlay binary." >&2
   exit 1
 fi
 
@@ -135,6 +156,8 @@ PY
 
 cp "$FRONTEND_BIN" "$APP_RESOURCES/StashMacOSApp"
 chmod +x "$APP_RESOURCES/StashMacOSApp"
+cp "$OVERLAY_BIN" "$APP_RESOURCES/StashOverlay"
+chmod +x "$APP_RESOURCES/StashOverlay"
 if [ -f "$ICON_ICNS" ]; then
   cp "$ICON_ICNS" "$APP_RESOURCES/AppIcon.icns"
 fi
@@ -185,6 +208,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RES_DIR="$(cd "$SCRIPT_DIR/../Resources" && pwd)"
 CONF_PATH="$RES_DIR/launcher.conf"
 FRONTEND_BIN="$RES_DIR/StashMacOSApp"
+OVERLAY_BIN="$RES_DIR/StashOverlay"
 
 if [ ! -f "$CONF_PATH" ]; then
   osascript -e 'display alert "Stash Local" message "Launcher config missing. Re-run installer." as critical'
@@ -239,15 +263,15 @@ if ! health_ok; then
   exit 1
 fi
 
-if [ ! -x "$FRONTEND_BIN" ]; then
-  osascript -e 'display alert "Stash Local" message "Frontend binary missing. Re-run installer." as critical'
+if [ ! -x "$OVERLAY_BIN" ]; then
+  osascript -e 'display alert "Stash Local" message "Overlay binary missing. Re-run installer." as critical'
   exit 1
 fi
 
 export STASH_BACKEND_URL
 export STASH_CODEX_MODE
 export STASH_CODEX_BIN
-"$FRONTEND_BIN" >>"$LOG_DIR/frontend.log" 2>&1 || true
+"$OVERLAY_BIN" >>"$LOG_DIR/overlay.log" 2>&1 || true
 
 if [ "$backend_started_by_launcher" -eq 1 ] && [ -f "$BACKEND_PID_FILE" ]; then
   pid="$(cat "$BACKEND_PID_FILE" 2>/dev/null || true)"

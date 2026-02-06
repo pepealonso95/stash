@@ -60,6 +60,21 @@ struct BackendClient {
         try await request(path: "/v1/runtime/setup-status", method: "GET", body: Optional<Int>.none)
     }
 
+    func activeProject() async throws -> ActiveProjectPayload {
+        try await request(path: "/v1/runtime/active-project", method: "GET", body: Optional<Int>.none)
+    }
+
+    func setActiveProject(projectID: String?) async throws -> ActiveProjectPayload {
+        struct Payload: Encodable {
+            let projectId: String?
+        }
+        return try await request(
+            path: "/v1/runtime/active-project",
+            method: "PUT",
+            body: Payload(projectId: projectID)
+        )
+    }
+
     func updateRuntimeConfig(
         plannerBackend: String,
         codexMode: String,

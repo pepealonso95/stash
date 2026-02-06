@@ -119,7 +119,7 @@ struct OverlayRootView: View {
         .onTapGesture {
             viewModel.handleOverlayTap()
         }
-        .onDrop(of: [UTType.fileURL], delegate: FileDropDelegate(viewModel: viewModel))
+        .onDrop(of: [UTType.fileURL, UTType.folder], delegate: FileDropDelegate(viewModel: viewModel))
     }
 }
 

@@ -184,6 +184,7 @@ class RuntimeConfigResponse(BaseModel):
     execution_mode: Literal["planner", "execute"]
     execution_parallel_reads_enabled: bool
     execution_parallel_reads_max_workers: int
+    active_project_id: str | None = None
     openai_api_key_set: bool
     openai_model: str
     openai_base_url: str
@@ -203,8 +204,18 @@ class RuntimeConfigUpdateRequest(BaseModel):
     execution_mode: Literal["planner", "execute"] | None = None
     execution_parallel_reads_enabled: bool | None = None
     execution_parallel_reads_max_workers: int | None = Field(default=None, ge=1, le=8)
+    active_project_id: str | None = None
+    clear_active_project_id: bool = False
     openai_api_key: str | None = None
     clear_openai_api_key: bool = False
     openai_model: str | None = None
     openai_base_url: str | None = None
     openai_timeout_seconds: int | None = Field(default=None, ge=5, le=300)
+
+
+class ActiveProjectResponse(BaseModel):
+    active_project_id: str | None = None
+
+
+class ActiveProjectUpdateRequest(BaseModel):
+    project_id: str | None = None

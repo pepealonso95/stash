@@ -97,6 +97,36 @@ final class BackendClient {
         self.encoder = encoder
     }
 
+    var backendURL: URL {
+        baseURL
+    }
+
+    func activeProjectID() async throws -> String? {
+        struct Response: Decodable {
+            let activeProjectId: String?
+        }
+        let response: Response = try await request(
+            path: "/v1/runtime/active-project",
+            method: "GET",
+            body: Optional<Int>.none
+        )
+        return response.activeProjectId
+    }
+
+    func setActiveProject(projectID: String?) async throws {
+        struct Payload: Encodable {
+            let projectId: String?
+        }
+        struct Response: Decodable {
+            let activeProjectId: String?
+        }
+        _ = try await request(
+            path: "/v1/runtime/active-project",
+            method: "PUT",
+            body: Payload(projectId: projectID)
+        ) as Response
+    }
+
     func listProjects() async throws -> [OverlayProject] {
         try await request(path: "/v1/projects", method: "GET", body: Optional<Int>.none)
     }
@@ -170,6 +200,28 @@ final class BackendClient {
         }
 
         return try await ensureDefaultProject()
+    }
+
+    func ensureMostRecentlyOpenedProject() async throws -> OverlayProject {
+        let projects = try await listProjects()
+        if let latest = projects.max(by: { ($0.lastOpenedAt ?? "") < ($1.lastOpenedAt ?? "") }) {
+            return latest
+        }
+        return try await ensureDefaultProject()
+    }
+
+    func resolveDropTargetProject(preferredProjectID: String?) async throws -> OverlayProject {
+        if let active = try? await activeProjectID(),
+           let activeProject = try? await ensureProjectSelection(preferredProjectID: active)
+        {
+            return activeProject
+        }
+        if let preferredProjectID,
+           let preferred = try? await ensureProjectSelection(preferredProjectID: preferredProjectID)
+        {
+            return preferred
+        }
+        return try await ensureMostRecentlyOpenedProject()
     }
 
     func registerAssets(urls: [URL], preferredProjectID: String?) async throws -> OverlayProject {

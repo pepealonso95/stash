@@ -4,15 +4,16 @@ import UniformTypeIdentifiers
 public struct RootView: View {
     @StateObject private var viewModel: AppViewModel
 
-    public init(initialProjectRootPath: String? = nil) {
+    public init(initialProjectRootPath: String? = nil, initialBackendURL: URL? = nil) {
         if let initialProjectRootPath {
             _viewModel = StateObject(
                 wrappedValue: AppViewModel(
-                    initialProjectRootURL: URL(fileURLWithPath: initialProjectRootPath, isDirectory: true)
+                    initialProjectRootURL: URL(fileURLWithPath: initialProjectRootPath, isDirectory: true),
+                    initialBackendURL: initialBackendURL
                 )
             )
         } else {
-            _viewModel = StateObject(wrappedValue: AppViewModel())
+            _viewModel = StateObject(wrappedValue: AppViewModel(initialBackendURL: initialBackendURL))
         }
     }
 
@@ -211,7 +212,7 @@ private struct FilesPanel: View {
                 )
                 .listRowInsets(EdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
                 .onDrop(
-                    of: [UTType.fileURL],
+                    of: [UTType.fileURL, UTType.folder],
                     isTargeted: Binding(
                         get: { rowDropTargetID == item.id },
                         set: { targeted in
@@ -230,7 +231,7 @@ private struct FilesPanel: View {
                 }
             }
             .listStyle(.inset)
-            .onDrop(of: [UTType.fileURL], isTargeted: $rootDropIsTargeted) { providers in
+            .onDrop(of: [UTType.fileURL, UTType.folder], isTargeted: $rootDropIsTargeted) { providers in
                 viewModel.handleFileDrop(providers: providers, toRelativeDirectory: nil)
             }
             .overlay(alignment: .bottomLeading) {

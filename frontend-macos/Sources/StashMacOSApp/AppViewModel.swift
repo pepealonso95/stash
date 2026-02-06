@@ -93,10 +93,14 @@ final class AppViewModel: ObservableObject {
         CodexModelPreset(value: "", label: "CLI default (latest)", hint: "Use your Codex CLI default"),
     ]
 
-    init(initialProjectRootURL: URL? = nil) {
+    init(initialProjectRootURL: URL? = nil, initialBackendURL: URL? = nil) {
         self.initialProjectRootURL = initialProjectRootURL
-        let defaultURL = ProcessInfo.processInfo.environment["STASH_BACKEND_URL"] ?? "http://127.0.0.1:8765"
-        client = BackendClient(baseURL: URL(string: defaultURL) ?? URL(string: "http://127.0.0.1:8765")!)
+        if let initialBackendURL {
+            client = BackendClient(baseURL: initialBackendURL)
+        } else {
+            let defaultURL = ProcessInfo.processInfo.environment["STASH_BACKEND_URL"] ?? "http://127.0.0.1:8765"
+            client = BackendClient(baseURL: URL(string: defaultURL) ?? URL(string: "http://127.0.0.1:8765")!)
+        }
     }
 
     deinit {
@@ -203,16 +207,16 @@ final class AppViewModel: ObservableObject {
             }
         }
 
+        if let initialProjectRootURL {
+            await openProject(url: initialProjectRootURL)
+            return
+        }
+
         if let bookmarkData = defaults.data(forKey: lastProjectBookmarkKey),
            let restored = resolveBookmarkedProjectURL(from: bookmarkData),
            FileManager.default.fileExists(atPath: restored.url.path)
         {
             await openProject(url: restored.url, bookmarkData: restored.bookmarkData)
-            return
-        }
-
-        if let initialProjectRootURL {
-            await openProject(url: initialProjectRootURL)
             return
         }
 
@@ -388,6 +392,7 @@ final class AppViewModel: ObservableObject {
                 name: prepared.url.lastPathComponent,
                 rootPath: prepared.url.path
             )
+            _ = try? await client.setActiveProject(projectID: opened.id)
             project = opened
             projectRootURL = prepared.url
             runPollTask?.cancel()
@@ -418,7 +423,10 @@ final class AppViewModel: ObservableObject {
 
     func handleFileDrop(providers: [NSItemProvider], toRelativeDirectory relativeDirectory: String?) -> Bool {
         guard projectRootURL != nil else { return false }
-        let acceptsFiles = providers.contains { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        let acceptsFiles = providers.contains {
+            $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) ||
+                $0.hasItemConformingToTypeIdentifier(UTType.folder.identifier)
+        }
         guard acceptsFiles else { return false }
 
         Task { await processDroppedFiles(providers: providers, toRelativeDirectory: relativeDirectory) }
@@ -598,17 +606,12 @@ final class AppViewModel: ObservableObject {
         }
 
         var importedCount = 0
-        var movedCount = 0
         var failures: [String] = []
 
         for source in droppedURLs {
             do {
-                let op = try transferDroppedItem(from: source, to: destinationBase, projectRoot: root)
-                if op == .moved {
-                    movedCount += 1
-                } else {
-                    importedCount += 1
-                }
+                _ = try transferDroppedItem(from: source, to: destinationBase, projectRoot: root)
+                importedCount += 1
             } catch {
                 failures.append("\(source.lastPathComponent): \(error.localizedDescription)")
             }
@@ -619,22 +622,15 @@ final class AppViewModel: ObservableObject {
 
         if !failures.isEmpty {
             let sample = failures.prefix(2).joined(separator: " | ")
-            errorText = "Dropped \(importedCount + movedCount) item(s), \(failures.count) failed. \(sample)"
+            errorText = "Dropped \(importedCount) item(s), \(failures.count) failed. \(sample)"
             return
         }
 
-        if movedCount > 0 && importedCount > 0 {
-            runStatusText = "Moved \(movedCount), imported \(importedCount)"
-        } else if movedCount > 0 {
-            runStatusText = "Moved \(movedCount) item(s)"
-        } else {
-            runStatusText = "Imported \(importedCount) item(s)"
-        }
+        runStatusText = "Imported \(importedCount) item(s)"
     }
 
     private enum DropTransferOp {
         case copied
-        case moved
     }
 
     private func transferDroppedItem(from sourceURL: URL, to destinationBase: URL, projectRoot: URL) throws -> DropTransferOp {
@@ -658,23 +654,19 @@ final class AppViewModel: ObservableObject {
             throw CocoaError(.fileWriteNoPermission)
         }
 
-        let sourceInsideProject = isInsideProject(source, root: projectRoot)
-        if sourceInsideProject {
-            if source.standardizedFileURL == destination.standardizedFileURL {
-                return .moved
-            }
-
-            if isDescendant(destination, of: source) {
-                throw NSError(
-                    domain: NSCocoaErrorDomain,
-                    code: NSFeatureUnsupportedError,
-                    userInfo: [NSLocalizedDescriptionKey: "Cannot move a folder into itself."]
-                )
-            }
-            try fm.moveItem(at: source, to: destination)
-            return .moved
+        if source.standardizedFileURL == destination.standardizedFileURL {
+            return .copied
         }
 
+        if isDescendant(destination, of: source) {
+            throw NSError(
+                domain: NSCocoaErrorDomain,
+                code: NSFeatureUnsupportedError,
+                userInfo: [NSLocalizedDescriptionKey: "Cannot copy a folder into itself."]
+            )
+        }
+
+        // Deep copy semantics: keep source untouched for both files and directories.
         try fm.copyItem(at: source, to: destination)
         return .copied
     }
@@ -729,7 +721,9 @@ final class AppViewModel: ObservableObject {
     private func loadDroppedFileURLs(from providers: [NSItemProvider]) async -> [URL] {
         var urls: [URL] = []
         for provider in providers {
-            guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else { continue }
+            guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) ||
+                provider.hasItemConformingToTypeIdentifier(UTType.folder.identifier)
+            else { continue }
             if let url = await loadSingleDroppedFileURL(from: provider) {
                 urls.append(url.standardizedFileURL)
             }
@@ -742,30 +736,31 @@ final class AppViewModel: ObservableObject {
     }
 
     private func loadSingleDroppedFileURL(from provider: NSItemProvider) async -> URL? {
-        await withCheckedContinuation { continuation in
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _error in
-                if let data = item as? Data,
-                   let url = NSURL(absoluteURLWithDataRepresentation: data, relativeTo: nil) as URL?
-                {
-                    continuation.resume(returning: url)
-                    return
+        for typeIdentifier in [UTType.fileURL.identifier, UTType.folder.identifier] {
+            let item: NSSecureCoding? = await withCheckedContinuation { continuation in
+                provider.loadItem(forTypeIdentifier: typeIdentifier, options: nil) { item, _error in
+                    continuation.resume(returning: item as NSSecureCoding?)
                 }
+            }
 
-                if let url = item as? URL {
-                    continuation.resume(returning: url)
-                    return
-                }
+            if let data = item as? Data,
+               let url = NSURL(absoluteURLWithDataRepresentation: data, relativeTo: nil) as URL?
+            {
+                return url
+            }
 
-                if let string = item as? String,
-                   let url = URL(string: string)
-                {
-                    continuation.resume(returning: url)
-                    return
-                }
+            if let url = item as? URL {
+                return url
+            }
 
-                continuation.resume(returning: nil)
+            if let string = item as? String,
+               let url = URL(string: string)
+            {
+                return url
             }
         }
+
+        return nil
     }
 
     func refreshConversations() async {

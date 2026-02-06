@@ -30,6 +30,7 @@ class RuntimeConfig:
     execution_mode: str = "execute"
     execution_parallel_reads_enabled: bool = True
     execution_parallel_reads_max_workers: int = 3
+    active_project_id: str | None = None
     openai_api_key: str | None = None
     openai_model: str = "gpt-5"
     openai_base_url: str = "https://api.openai.com/v1"
@@ -87,6 +88,7 @@ class RuntimeConfigStore:
             "execution_mode": cfg.execution_mode,
             "execution_parallel_reads_enabled": cfg.execution_parallel_reads_enabled,
             "execution_parallel_reads_max_workers": cfg.execution_parallel_reads_max_workers,
+            "active_project_id": cfg.active_project_id,
             "openai_api_key_set": bool(cfg.openai_api_key),
             "openai_model": cfg.openai_model,
             "openai_base_url": cfg.openai_base_url,
@@ -108,6 +110,8 @@ class RuntimeConfigStore:
         execution_mode: str | None = None,
         execution_parallel_reads_enabled: bool | None = None,
         execution_parallel_reads_max_workers: int | None = None,
+        active_project_id: str | None = None,
+        clear_active_project_id: bool = False,
         openai_api_key: str | None = None,
         clear_openai_api_key: bool = False,
         openai_model: str | None = None,
@@ -170,6 +174,12 @@ class RuntimeConfigStore:
                     raise ValueError("execution_parallel_reads_max_workers must be between 1 and 8")
                 next_cfg.execution_parallel_reads_max_workers = execution_parallel_reads_max_workers
 
+            if clear_active_project_id:
+                next_cfg.active_project_id = None
+            elif active_project_id is not None:
+                cleaned = active_project_id.strip()
+                next_cfg.active_project_id = cleaned or None
+
             if clear_openai_api_key:
                 next_cfg.openai_api_key = None
             elif openai_api_key is not None:
@@ -221,6 +231,7 @@ class RuntimeConfigStore:
                 execution_mode=parsed.get("execution_mode"),
                 execution_parallel_reads_enabled=parsed.get("execution_parallel_reads_enabled"),
                 execution_parallel_reads_max_workers=parsed.get("execution_parallel_reads_max_workers"),
+                active_project_id=parsed.get("active_project_id"),
                 openai_api_key=parsed.get("openai_api_key"),
                 openai_model=parsed.get("openai_model"),
                 openai_base_url=parsed.get("openai_base_url"),
