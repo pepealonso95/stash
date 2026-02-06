@@ -74,6 +74,93 @@ enum WorkspacePathValidator {
     }
 }
 
+enum ExplorerClickResolver {
+    static let doubleClickThresholdSeconds: TimeInterval = 0.22
+
+    static var previewDelayNanoseconds: UInt64 {
+        UInt64(doubleClickThresholdSeconds * 1_000_000_000)
+    }
+
+    static func isDoubleClick(
+        currentPath: String,
+        previousPath: String?,
+        previousTapAt: Date,
+        currentTapAt: Date,
+        threshold: TimeInterval = doubleClickThresholdSeconds
+    ) -> Bool {
+        guard let previousPath, previousPath == currentPath else {
+            return false
+        }
+        return currentTapAt.timeIntervalSince(previousTapAt) <= threshold
+    }
+}
+
+enum TextFileDecoder {
+    private static let fallbackEncodings: [String.Encoding] = [
+        .utf8,
+        .utf16,
+        .utf16LittleEndian,
+        .utf16BigEndian,
+        .unicode,
+        .windowsCP1252,
+        .isoLatin1,
+    ]
+
+    static func decode(data: Data, forceText: Bool) -> (text: String, isBinary: Bool) {
+        if data.isEmpty {
+            return ("", false)
+        }
+
+        if let text = decodeUsingKnownBOM(data: data) {
+            return (text, false)
+        }
+
+        for encoding in fallbackEncodings {
+            if let text = String(data: data, encoding: encoding),
+               looksReasonablyTextual(text, forceText: forceText)
+            {
+                return (text, false)
+            }
+        }
+
+        if forceText {
+            // Keep editable formats usable even with uncommon encodings.
+            return (String(decoding: data, as: UTF8.self), false)
+        }
+
+        return ("", true)
+    }
+
+    private static func decodeUsingKnownBOM(data: Data) -> String? {
+        if data.starts(with: [0xEF, 0xBB, 0xBF]) {
+            return String(data: data, encoding: .utf8)
+        }
+        if data.starts(with: [0xFF, 0xFE]) {
+            return String(data: data, encoding: .utf16LittleEndian)
+        }
+        if data.starts(with: [0xFE, 0xFF]) {
+            return String(data: data, encoding: .utf16BigEndian)
+        }
+        return nil
+    }
+
+    private static func looksReasonablyTextual(_ value: String, forceText: Bool) -> Bool {
+        if value.isEmpty {
+            return true
+        }
+        if forceText {
+            return true
+        }
+        let replacementCount = value.reduce(into: 0) { count, character in
+            if character == "\u{FFFD}" {
+                count += 1
+            }
+        }
+        let ratio = Double(replacementCount) / Double(value.count)
+        return ratio < 0.15
+    }
+}
+
 enum CSVCodec {
     static func parse(_ content: String) -> [[String]] {
         if content.isEmpty {

@@ -46,6 +46,7 @@ final class AppViewModel: ObservableObject {
     @Published var collapsedDirectoryPaths: Set<String> = []
     @Published var fileQuery = ""
     @Published var explorerMode: ExplorerMode = .folders
+    @Published var selectedExplorerPath: String?
     @Published var folderViewPath = ""
     @Published var workspaceTabs: [WorkspaceTab] = []
     @Published var activeTabID: String?
@@ -112,6 +113,10 @@ final class AppViewModel: ObservableObject {
     private var activeRunID: String?
     private var lastRunEventID = 0
     private var autosaveTasksByPath: [String: Task<Void, Never>] = [:]
+    private var pendingSingleClickTask: Task<Void, Never>?
+    private var pendingSingleClickPath: String?
+    private var lastExplorerClickPath: String?
+    private var lastExplorerClickAt = Date.distantPast
     private var isRestoringWorkspaceSession = false
     private var client: BackendClient
     private let baseCodexModelPresets: [CodexModelPreset] = [
@@ -139,6 +144,7 @@ final class AppViewModel: ObservableObject {
         for task in autosaveTasksByPath.values {
             task.cancel()
         }
+        pendingSingleClickTask?.cancel()
         if let activeSecurityScopedProjectURL {
             activeSecurityScopedProjectURL.stopAccessingSecurityScopedResource()
         }
@@ -267,6 +273,9 @@ final class AppViewModel: ObservableObject {
     func setExplorerMode(_ mode: ExplorerMode) {
         guard explorerMode != mode else { return }
         explorerMode = mode
+        if mode != .tree {
+            cancelPendingExplorerSingleClick()
+        }
         persistTabsForProject()
     }
 
@@ -283,6 +292,34 @@ final class AppViewModel: ObservableObject {
         }
         folderViewPath = normalized
         persistTabsForProject()
+    }
+
+    func handleExplorerTreePrimaryClick(_ item: FileItem) {
+        selectedExplorerPath = item.relativePath
+        if item.isDirectory {
+            cancelPendingExplorerSingleClick()
+            toggleDirectoryExpanded(item)
+            return
+        }
+
+        let now = Date()
+        let isDouble = ExplorerClickResolver.isDoubleClick(
+            currentPath: item.relativePath,
+            previousPath: lastExplorerClickPath,
+            previousTapAt: lastExplorerClickAt,
+            currentTapAt: now
+        )
+        if isDouble {
+            cancelPendingExplorerSingleClick()
+            lastExplorerClickPath = nil
+            lastExplorerClickAt = .distantPast
+            openFile(item, mode: .pinned)
+            return
+        }
+
+        lastExplorerClickPath = item.relativePath
+        lastExplorerClickAt = now
+        scheduleSingleClickPreviewOpen(for: item)
     }
 
     func openFile(_ item: FileItem, mode: FileOpenMode = .preview) {
@@ -303,6 +340,7 @@ final class AppViewModel: ObservableObject {
             errorText = "File no longer exists: \(relativePath)"
             return
         }
+        selectedExplorerPath = relativePath
         let itemURL = projectRootURL.appendingPathComponent(relativePath).standardizedFileURL
 
         guard FileManager.default.fileExists(atPath: itemURL.path) else {
@@ -317,21 +355,19 @@ final class AppViewModel: ObservableObject {
                 workspaceTabs[existingIndex].isPreview = false
             }
             activateTab(workspaceTabs[existingIndex].id)
+            setWorkspaceStatus(mode == .preview ? "Previewing \(fileItem.name)" : "Opened \(fileItem.name) in tab")
             return
         }
 
         let fileKind = detectFileKind(for: fileItem, url: itemURL)
         let newTab: WorkspaceTab
-        if mode == .preview,
-           let previewIndex = workspaceTabs.firstIndex(where: { $0.isPreview && !$0.isPinned })
-        {
-            let previewID = workspaceTabs[previewIndex].id
-            saveBuffer(relativePath: workspaceTabs[previewIndex].relativePath)
-            workspaceTabs.remove(at: previewIndex)
-            newTab = WorkspaceTab(
-                id: previewID,
+        if mode == .preview {
+            if let previewIndex = workspaceTabs.firstIndex(where: { $0.isPreview && !$0.isPinned }) {
+                workspaceTabs[previewIndex].isPinned = true
+                workspaceTabs[previewIndex].isPreview = false
+            }
+            newTab = WorkspaceTab.make(
                 relativePath: relativePath,
-                title: fileItem.name,
                 fileKind: fileKind,
                 isPreview: true,
                 isPinned: false
@@ -349,6 +385,7 @@ final class AppViewModel: ObservableObject {
         activeTabID = newTab.id
         ensureDocumentBufferLoaded(relativePath: relativePath, fileKind: fileKind, itemURL: itemURL, item: fileItem)
         persistTabsForProject()
+        setWorkspaceStatus(mode == .preview ? "Previewing \(fileItem.name)" : "Opened \(fileItem.name) in tab")
     }
 
     func activateTab(_ tabID: String) {
@@ -671,10 +708,12 @@ final class AppViewModel: ObservableObject {
         for task in autosaveTasksByPath.values {
             task.cancel()
         }
+        cancelPendingExplorerSingleClick()
         autosaveTasksByPath = [:]
         workspaceTabs = []
         activeTabID = nil
         documentBuffers = [:]
+        selectedExplorerPath = nil
         folderViewPath = ""
     }
 
@@ -684,8 +723,10 @@ final class AppViewModel: ObservableObject {
         }
 
         let data = (try? Data(contentsOf: itemURL)) ?? Data()
-        let isBinary = isLikelyBinary(data: data)
-        let content = isBinary ? "" : String(decoding: data, as: UTF8.self)
+        let shouldForceText = fileKind.isEditable || fileKind == .csv
+        let decoded = TextFileDecoder.decode(data: data, forceText: shouldForceText)
+        let content = decoded.text
+        let isBinary = decoded.isBinary
         documentBuffers[relativePath] = DocumentBuffer(
             relativePath: relativePath,
             fileKind: fileKind,
@@ -824,6 +865,7 @@ final class AppViewModel: ObservableObject {
     private func reconcileWorkspaceAfterFileRefresh(scanned: [FileItem]) {
         let validFilePaths = Set(scanned.filter { !$0.isDirectory }.map(\.relativePath))
         let validDirPaths = Set(scanned.filter(\.isDirectory).map(\.relativePath))
+        let validPaths = validFilePaths.union(validDirPaths)
 
         let stalePaths = Set(workspaceTabs.map(\.relativePath)).subtracting(validFilePaths)
         if !stalePaths.isEmpty {
@@ -843,6 +885,38 @@ final class AppViewModel: ObservableObject {
             folderViewPath = ""
             persistTabsForProject()
         }
+
+        if let selectedExplorerPath, !validPaths.contains(selectedExplorerPath) {
+            self.selectedExplorerPath = nil
+        }
+    }
+
+    private func scheduleSingleClickPreviewOpen(for item: FileItem) {
+        cancelPendingExplorerSingleClick()
+        pendingSingleClickPath = item.relativePath
+        pendingSingleClickTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: ExplorerClickResolver.previewDelayNanoseconds)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                guard self.pendingSingleClickPath == item.relativePath else { return }
+                self.openFile(item, mode: .preview)
+                self.pendingSingleClickTask = nil
+                self.pendingSingleClickPath = nil
+            }
+        }
+    }
+
+    private func cancelPendingExplorerSingleClick() {
+        pendingSingleClickTask?.cancel()
+        pendingSingleClickTask = nil
+        pendingSingleClickPath = nil
+    }
+
+    private func setWorkspaceStatus(_ text: String) {
+        guard !runInProgress else { return }
+        guard !isRestoringWorkspaceSession else { return }
+        runStatusText = text
     }
 
     func bootstrap() async {

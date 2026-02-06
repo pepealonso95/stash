@@ -155,38 +155,42 @@ struct ExplorerPanel: View {
     }
 
     private var treeView: some View {
-        List(viewModel.filteredFiles) { item in
-            let targetDirectory = dropTargetDirectory(for: item)
-            explorerRow(item: item)
-                .help(item.relativePath)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(rowDropTargetID == item.id ? CodexTheme.accent.opacity(0.16) : Color.clear)
-                )
-                .listRowInsets(EdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
-                .onDrop(
-                    of: [UTType.fileURL, UTType.folder],
-                    isTargeted: Binding(
-                        get: { rowDropTargetID == item.id },
-                        set: { targeted in
-                            if targeted {
-                                rowDropTargetID = item.id
-                            } else if rowDropTargetID == item.id {
-                                rowDropTargetID = nil
-                            }
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                ForEach(viewModel.filteredFiles) { item in
+                    let targetDirectory = dropTargetDirectory(for: item)
+                    explorerRow(item: item)
+                        .help(item.relativePath)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(rowBackgroundColor(for: item))
+                        )
+                        .onDrop(
+                            of: [UTType.fileURL, UTType.folder],
+                            isTargeted: Binding(
+                                get: { rowDropTargetID == item.id },
+                                set: { targeted in
+                                    if targeted {
+                                        rowDropTargetID = item.id
+                                    } else if rowDropTargetID == item.id {
+                                        rowDropTargetID = nil
+                                    }
+                                }
+                            )
+                        ) { providers in
+                            viewModel.handleFileDrop(providers: providers, toRelativeDirectory: targetDirectory)
                         }
-                    )
-                ) { providers in
-                    viewModel.handleFileDrop(providers: providers, toRelativeDirectory: targetDirectory)
+                        .onDrag {
+                            dragProvider(for: item)
+                        }
+                        .contextMenu {
+                            contextMenu(for: item)
+                        }
                 }
-                .onDrag {
-                    dragProvider(for: item)
-                }
-                .contextMenu {
-                    contextMenu(for: item)
-                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
         }
-        .listStyle(.inset)
         .onDrop(of: [UTType.fileURL, UTType.folder], isTargeted: $rootDropIsTargeted) { providers in
             viewModel.handleFileDrop(providers: providers, toRelativeDirectory: nil)
         }
@@ -251,45 +255,39 @@ struct ExplorerPanel: View {
     }
 
     private func explorerRow(item: FileItem) -> some View {
-        HStack(spacing: 8) {
-            if item.isDirectory {
-                Button {
-                    viewModel.toggleDirectoryExpanded(item)
-                } label: {
-                    Image(systemName: viewModel.isDirectoryExpanded(item) ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(CodexTheme.textSecondary)
-                        .frame(width: 12, alignment: .center)
+        Button {
+            viewModel.handleExplorerTreePrimaryClick(item)
+        } label: {
+            HStack(spacing: 8) {
+                if item.isDirectory {
+                    Button {
+                        viewModel.toggleDirectoryExpanded(item)
+                    } label: {
+                        Image(systemName: viewModel.isDirectoryExpanded(item) ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(CodexTheme.textSecondary)
+                            .frame(width: 12, alignment: .center)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Color.clear
+                        .frame(width: 12, height: 12)
                 }
-                .buttonStyle(.plain)
-            } else {
-                Color.clear
-                    .frame(width: 12, height: 12)
-            }
 
-            Image(systemName: item.isDirectory ? "folder.fill" : fileIcon(for: item))
-                .foregroundStyle(item.isDirectory ? CodexTheme.accent : CodexTheme.textSecondary)
-            Text(item.name)
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(CodexTheme.textPrimary)
-            Spacer()
-        }
-        .padding(.leading, CGFloat(item.depth) * 14)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            if item.isDirectory {
-                viewModel.toggleDirectoryExpanded(item)
-            } else {
-                viewModel.openFile(item, mode: .pinned)
+                Image(systemName: item.isDirectory ? "folder.fill" : fileIcon(for: item))
+                    .foregroundStyle(item.isDirectory ? CodexTheme.accent : CodexTheme.textSecondary)
+                Text(item.name)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(CodexTheme.textPrimary)
+                Spacer()
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, CGFloat(item.depth) * 14)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+            .contentShape(Rectangle())
         }
-        .onTapGesture {
-            if item.isDirectory {
-                viewModel.toggleDirectoryExpanded(item)
-            } else {
-                viewModel.openFile(item, mode: .preview)
-            }
-        }
+        .buttonStyle(.plain)
     }
 
     private func folderTile(item: FileItem) -> some View {
@@ -429,6 +427,16 @@ struct ExplorerPanel: View {
         case .text, .unknown:
             return "doc.text"
         }
+    }
+
+    private func rowBackgroundColor(for item: FileItem) -> Color {
+        if rowDropTargetID == item.id {
+            return CodexTheme.accent.opacity(0.16)
+        }
+        if viewModel.selectedExplorerPath == item.relativePath {
+            return CodexTheme.accent.opacity(0.08)
+        }
+        return Color.clear
     }
 }
 

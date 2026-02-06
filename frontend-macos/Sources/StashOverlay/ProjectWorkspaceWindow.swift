@@ -4,6 +4,9 @@ import StashMacOSCore
 import SwiftUI
 
 final class ProjectWorkspaceWindowController: NSWindowController, NSWindowDelegate {
+    private static let recommendedWorkspaceSize = NSSize(width: 1440, height: 860)
+    private static let minimumWorkspaceSize = NSSize(width: 1220, height: 760)
+
     let projectID: String
     var onWindowClosed: ((String) -> Void)?
     var onWindowFocused: ((String) -> Void)?
@@ -19,13 +22,18 @@ final class ProjectWorkspaceWindowController: NSWindowController, NSWindowDelega
             .preferredColorScheme(.light)
         )
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1240, height: 820),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: Self.recommendedWorkspaceSize.width,
+                height: Self.recommendedWorkspaceSize.height
+            ),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "Stash - \(project.name)"
-        window.minSize = NSSize(width: 980, height: 700)
+        window.minSize = Self.minimumWorkspaceSize
         window.contentViewController = hostingController
         window.appearance = NSAppearance(named: .aqua)
         window.isReleasedWhenClosed = false
@@ -50,13 +58,18 @@ final class ProjectWorkspaceWindowController: NSWindowController, NSWindowDelega
             .preferredColorScheme(.light)
         )
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1240, height: 820),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: Self.recommendedWorkspaceSize.width,
+                height: Self.recommendedWorkspaceSize.height
+            ),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "Stash"
-        window.minSize = NSSize(width: 980, height: 700)
+        window.minSize = Self.minimumWorkspaceSize
         window.contentViewController = hostingController
         window.appearance = NSAppearance(named: .aqua)
         window.isReleasedWhenClosed = false
@@ -72,5 +85,24 @@ final class ProjectWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     func windowDidBecomeKey(_ notification: Notification) {
         onWindowFocused?(projectID)
+    }
+
+    func ensureThreePaneWorkspaceFrame() {
+        guard let window else { return }
+        let minWidth = Self.minimumWorkspaceSize.width
+        let minHeight = Self.minimumWorkspaceSize.height
+        var nextFrame = window.frame
+
+        if nextFrame.width < minWidth {
+            nextFrame.origin.x -= (minWidth - nextFrame.width) / 2
+            nextFrame.size.width = minWidth
+        }
+        if nextFrame.height < minHeight {
+            nextFrame.origin.y -= (minHeight - nextFrame.height) / 2
+            nextFrame.size.height = minHeight
+        }
+        if nextFrame != window.frame {
+            window.setFrame(nextFrame, display: true, animate: true)
+        }
     }
 }

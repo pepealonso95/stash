@@ -4,7 +4,12 @@ Codex-style light-mode desktop UI for Stash.
 
 ## What is implemented
 
-- Clean Codex-style light desktop layout (project picker, folder structure, chat)
+- Clean Codex-style light desktop layout (project picker, 3-pane explorer/workspace/chat)
+- VS Code-like file opening in the workspace:
+  - Tree mode single-click opens a preview tab
+  - Tree mode double-click opens/pins a regular tab
+  - Opening a different file as preview auto-pins the previous preview tab to keep multiple tabs visible
+  - Fallback always available via right-click: `Open Preview` / `Open Pinned`
 - Automatic project onboarding:
   - If no project is open, user picks folder with the button in the UI
   - Last opened folder is restored automatically on next launch (if still available)

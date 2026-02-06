@@ -225,6 +225,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         onboardingWindowController = nil
         closeWorkspaceWindows(exceptProjectID: project.id)
         if let existing = workspaceWindowControllers[project.id] {
+            existing.ensureThreePaneWorkspaceFrame()
             existing.showWindow(nil)
             existing.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -253,6 +254,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         Task { [weak self] in
             try? await self?.viewModel.backendClient.setActiveProject(projectID: project.id)
         }
+        controller.ensureThreePaneWorkspaceFrame()
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -261,6 +263,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     @MainActor
     private func openOnboardingWorkspaceWindow() {
         if let existing = onboardingWindowController {
+            existing.ensureThreePaneWorkspaceFrame()
             existing.showWindow(nil)
             existing.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -272,6 +275,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
             self?.onboardingWindowController = nil
         }
         onboardingWindowController = controller
+        controller.ensureThreePaneWorkspaceFrame()
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

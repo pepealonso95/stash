@@ -32,6 +32,48 @@ final class WorkspaceCoreTests: XCTestCase {
         XCTAssertFalse(WorkspacePathValidator.isDescendant(root, of: inside))
     }
 
+    func testExplorerClickResolverDoubleClick() {
+        let t0 = Date()
+        let tFast = t0.addingTimeInterval(0.1)
+        let tSlow = t0.addingTimeInterval(0.4)
+
+        XCTAssertTrue(
+            ExplorerClickResolver.isDoubleClick(
+                currentPath: "docs/a.md",
+                previousPath: "docs/a.md",
+                previousTapAt: t0,
+                currentTapAt: tFast
+            )
+        )
+
+        XCTAssertFalse(
+            ExplorerClickResolver.isDoubleClick(
+                currentPath: "docs/a.md",
+                previousPath: "docs/b.md",
+                previousTapAt: t0,
+                currentTapAt: tFast
+            )
+        )
+
+        XCTAssertFalse(
+            ExplorerClickResolver.isDoubleClick(
+                currentPath: "docs/a.md",
+                previousPath: "docs/a.md",
+                previousTapAt: t0,
+                currentTapAt: tSlow
+            )
+        )
+    }
+
+    func testTextFileDecoderUTF16CSV() {
+        let csv = "h1,h2\nv1,v2\nv3,v4"
+        let data = csv.data(using: .utf16LittleEndian) ?? Data()
+        let decoded = TextFileDecoder.decode(data: data, forceText: true)
+        XCTAssertFalse(decoded.isBinary)
+        XCTAssertTrue(decoded.text.contains("v1,v2"))
+        XCTAssertTrue(decoded.text.contains("v3,v4"))
+    }
+
     @MainActor
     func testPreviewTabReplacementAndPinning() throws {
         let temp = try makeTempProject()
