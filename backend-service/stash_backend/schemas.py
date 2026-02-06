@@ -53,6 +53,12 @@ class ConversationResponse(BaseModel):
     summary: str | None = None
 
 
+class ConversationDeleteResponse(BaseModel):
+    deleted: bool
+    conversation_id: str
+    active_conversation_id: str | None = None
+
+
 class MessageCreateRequest(BaseModel):
     role: Literal["user", "assistant", "tool", "system"] = "user"
     content: str = Field(min_length=1)
@@ -206,6 +212,7 @@ class RuntimeConfigResponse(BaseModel):
     execution_parallel_reads_enabled: bool
     execution_parallel_reads_max_workers: int
     active_project_id: str | None = None
+    active_project_root_path: str | None = None
     openai_api_key_set: bool
     openai_model: str
     openai_base_url: str
@@ -226,7 +233,9 @@ class RuntimeConfigUpdateRequest(BaseModel):
     execution_parallel_reads_enabled: bool | None = None
     execution_parallel_reads_max_workers: int | None = Field(default=None, ge=1, le=8)
     active_project_id: str | None = None
+    active_project_root_path: str | None = None
     clear_active_project_id: bool = False
+    clear_active_project_root_path: bool = False
     openai_api_key: str | None = None
     clear_openai_api_key: bool = False
     openai_model: str | None = None
@@ -236,6 +245,7 @@ class RuntimeConfigUpdateRequest(BaseModel):
 
 class ActiveProjectResponse(BaseModel):
     active_project_id: str | None = None
+    active_project_root_path: str | None = None
 
 
 class ActiveProjectUpdateRequest(BaseModel):

@@ -9,7 +9,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     private var projectPopover: NSPopover?
     private var shouldPresentProjectPickerOnActivate = false
     private var didPromptForAccessibility = false
-    private var attachedDocumentKeys: Set<String> = []
+    private var attachedDocumentKeys: [String: Date] = [:]
     private var workspaceWindowControllers: [String: ProjectWorkspaceWindowController] = [:]
     private var activeWorkspaceProjectID: String?
     private var onboardingWindowController: ProjectWorkspaceWindowController?
@@ -229,6 +229,10 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
             existing.showWindow(nil)
             existing.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            activeWorkspaceProjectID = project.id
+            Task { @MainActor [weak self] in
+                await self?.syncActiveProjectSelection(projectID: project.id)
+            }
             return
         }
 
@@ -238,8 +242,8 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         )
         controller.onWindowFocused = { [weak self] projectID in
             self?.activeWorkspaceProjectID = projectID
-            Task { [weak self] in
-                try? await self?.viewModel.backendClient.setActiveProject(projectID: projectID)
+            Task { @MainActor [weak self] in
+                await self?.syncActiveProjectSelection(projectID: projectID)
             }
         }
         controller.onWindowClosed = { [weak self] projectID in
@@ -251,8 +255,8 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         }
         workspaceWindowControllers[project.id] = controller
         activeWorkspaceProjectID = project.id
-        Task { [weak self] in
-            try? await self?.viewModel.backendClient.setActiveProject(projectID: project.id)
+        Task { @MainActor [weak self] in
+            await self?.syncActiveProjectSelection(projectID: project.id)
         }
         controller.ensureThreePaneWorkspaceFrame()
         controller.showWindow(nil)
@@ -291,15 +295,16 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     @MainActor
     private func processDetectedDocumentInteraction(_ detectedDocument: DetectedDocumentContext) async {
         do {
-            let project = try await viewModel.backendClient.ensureMostRecentlyOpenedProject()
+            let preferredID = activeWorkspaceProjectID ?? viewModel.selectedProject?.id
+            let project = try await viewModel.backendClient.resolveDropTargetProject(preferredProjectID: preferredID)
             projectPopover?.performClose(nil)
             openWorkspaceWindow(for: project)
 
             let attachmentKey = makeAttachmentKey(projectID: project.id, documentURL: detectedDocument.url)
-            guard !attachedDocumentKeys.contains(attachmentKey) else { return }
+            guard canAttachDocument(withKey: attachmentKey) else { return }
 
             try await viewModel.backendClient.registerAssets(urls: [detectedDocument.url], projectID: project.id)
-            attachedDocumentKeys.insert(attachmentKey)
+            markDocumentAttached(attachmentKey)
         } catch {
             print("Detected document handling failed: \(error)")
         }
@@ -315,7 +320,44 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func makeAttachmentKey(projectID: String, documentURL: URL) -> String {
-        "\(projectID)|\(documentURL.standardizedFileURL.path)"
+        let normalized = documentURL.standardizedFileURL
+        let values = try? normalized.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let size = values?.fileSize ?? -1
+        let modified = Int(values?.contentModificationDate?.timeIntervalSince1970 ?? -1)
+        return "\(projectID)|\(normalized.path)|\(size)|\(modified)"
+    }
+
+    private func canAttachDocument(withKey key: String) -> Bool {
+        pruneAttachmentKeys()
+        return attachedDocumentKeys[key] == nil
+    }
+
+    private func markDocumentAttached(_ key: String) {
+        attachedDocumentKeys[key] = Date()
+    }
+
+    private func pruneAttachmentKeys() {
+        let now = Date()
+        let expirationInterval: TimeInterval = 6 * 60 * 60
+        attachedDocumentKeys = attachedDocumentKeys.filter { now.timeIntervalSince($0.value) < expirationInterval }
+        if attachedDocumentKeys.count <= 512 {
+            return
+        }
+        let keep = attachedDocumentKeys
+            .sorted { $0.value > $1.value }
+            .prefix(384)
+            .map { ($0.key, $0.value) }
+        attachedDocumentKeys = Dictionary(uniqueKeysWithValues: keep)
+    }
+
+    @MainActor
+    private func syncActiveProjectSelection(projectID: String) async {
+        do {
+            try await viewModel.backendClient.setActiveProject(projectID: projectID)
+        } catch {
+            print("Failed to sync active project \(projectID): \(error)")
+            await synchronizeSelectedProjectWithGlobalActive()
+        }
     }
 
     @MainActor

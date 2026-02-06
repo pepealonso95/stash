@@ -115,16 +115,32 @@ enum TextFileDecoder {
             return (text, false)
         }
 
+        if forceText,
+           let utf16Guess = detectLikelyUTF16Encoding(data: data),
+           let text = String(data: data, encoding: utf16Guess),
+           looksReasonablyTextual(text)
+        {
+            return (text, false)
+        }
+
+        var firstDecodedCandidate: String?
         for encoding in fallbackEncodings {
-            if let text = String(data: data, encoding: encoding),
-               looksReasonablyTextual(text, forceText: forceText)
-            {
+            guard let text = String(data: data, encoding: encoding) else {
+                continue
+            }
+            if firstDecodedCandidate == nil {
+                firstDecodedCandidate = text
+            }
+            if looksReasonablyTextual(text) {
                 return (text, false)
             }
         }
 
         if forceText {
             // Keep editable formats usable even with uncommon encodings.
+            if let firstDecodedCandidate {
+                return (firstDecodedCandidate, false)
+            }
             return (String(decoding: data, as: UTF8.self), false)
         }
 
@@ -144,20 +160,72 @@ enum TextFileDecoder {
         return nil
     }
 
-    private static func looksReasonablyTextual(_ value: String, forceText: Bool) -> Bool {
+    private static func looksReasonablyTextual(_ value: String) -> Bool {
         if value.isEmpty {
             return true
         }
-        if forceText {
-            return true
-        }
-        let replacementCount = value.reduce(into: 0) { count, character in
-            if character == "\u{FFFD}" {
-                count += 1
+        var replacementCount = 0
+        var nullCount = 0
+        var controlCount = 0
+        let scalarCount = max(1, value.unicodeScalars.count)
+        for scalar in value.unicodeScalars {
+            let code = scalar.value
+            if code == 0xFFFD {
+                replacementCount += 1
+            }
+            if code == 0 {
+                nullCount += 1
+            }
+            if (code < 0x20 && code != 0x09 && code != 0x0A && code != 0x0D) || (code >= 0x7F && code <= 0x9F) {
+                controlCount += 1
             }
         }
-        let ratio = Double(replacementCount) / Double(value.count)
-        return ratio < 0.15
+        let replacementRatio = Double(replacementCount) / Double(scalarCount)
+        if replacementRatio > 0.15 {
+            return false
+        }
+        let nullRatio = Double(nullCount) / Double(scalarCount)
+        if nullRatio > 0.05 {
+            return false
+        }
+        let controlRatio = Double(controlCount) / Double(scalarCount)
+        return controlRatio < 0.2
+    }
+
+    private static func detectLikelyUTF16Encoding(data: Data) -> String.Encoding? {
+        if data.count < 4 {
+            return nil
+        }
+        let sample = data.prefix(512)
+        var evenTotal = 0
+        var oddTotal = 0
+        var evenZeros = 0
+        var oddZeros = 0
+        for (index, byte) in sample.enumerated() {
+            if index % 2 == 0 {
+                evenTotal += 1
+                if byte == 0 {
+                    evenZeros += 1
+                }
+            } else {
+                oddTotal += 1
+                if byte == 0 {
+                    oddZeros += 1
+                }
+            }
+        }
+        guard evenTotal > 0, oddTotal > 0 else {
+            return nil
+        }
+        let evenZeroRatio = Double(evenZeros) / Double(evenTotal)
+        let oddZeroRatio = Double(oddZeros) / Double(oddTotal)
+        if oddZeroRatio > 0.35, evenZeroRatio < 0.2 {
+            return .utf16LittleEndian
+        }
+        if evenZeroRatio > 0.35, oddZeroRatio < 0.2 {
+            return .utf16BigEndian
+        }
+        return nil
     }
 }
 

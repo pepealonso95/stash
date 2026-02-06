@@ -20,6 +20,12 @@ struct Conversation: Decodable, Identifiable, Hashable {
     let summary: String?
 }
 
+struct ConversationDeletePayload: Decodable {
+    let deleted: Bool
+    let conversationId: String
+    let activeConversationId: String?
+}
+
 struct CSVCellChange: Decodable, Hashable, Identifiable {
     let row: Int
     let column: Int
@@ -635,6 +641,7 @@ struct RuntimeConfigPayload: Decodable {
     let plannerCmd: String?
     let plannerTimeoutSeconds: Int
     let activeProjectId: String?
+    let activeProjectRootPath: String?
     let openaiApiKeySet: Bool
     let openaiModel: String
     let openaiBaseUrl: String
@@ -644,6 +651,7 @@ struct RuntimeConfigPayload: Decodable {
 
 struct ActiveProjectPayload: Decodable {
     let activeProjectId: String?
+    let activeProjectRootPath: String?
 }
 
 struct RuntimeSetupStatus: Decodable {

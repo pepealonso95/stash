@@ -371,6 +371,94 @@ class ProjectRepository:
         )
         return self.get_conversation(conversation_id)
 
+    def list_run_ids_for_conversation(self, conversation_id: str) -> list[str]:
+        rows = self._fetchall(
+            """
+            SELECT id
+            FROM runs
+            WHERE conversation_id=?
+            ORDER BY created_at DESC
+            """,
+            (conversation_id,),
+        )
+        return [str(row["id"]) for row in rows]
+
+    def delete_conversation(self, conversation_id: str) -> dict[str, Any] | None:
+        with self.ctx.lock:
+            existing = self.ctx.conn.execute(
+                "SELECT id FROM conversations WHERE id=?",
+                (conversation_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+
+            run_rows = self.ctx.conn.execute(
+                "SELECT id FROM runs WHERE conversation_id=?",
+                (conversation_id,),
+            ).fetchall()
+            run_ids = [str(row["id"]) for row in run_rows if row is not None]
+            if run_ids:
+                run_placeholders = ",".join("?" for _ in run_ids)
+                params = tuple(run_ids)
+                self.ctx.conn.execute(f"DELETE FROM run_steps WHERE run_id IN ({run_placeholders})", params)
+                self.ctx.conn.execute(f"DELETE FROM run_change_sets WHERE run_id IN ({run_placeholders})", params)
+                self.ctx.conn.execute(f"DELETE FROM events WHERE run_id IN ({run_placeholders})", params)
+                self.ctx.conn.execute(f"DELETE FROM runs WHERE id IN ({run_placeholders})", params)
+
+            message_rows = self.ctx.conn.execute(
+                "SELECT id FROM messages WHERE conversation_id=?",
+                (conversation_id,),
+            ).fetchall()
+            message_ids = [str(row["id"]) for row in message_rows if row is not None]
+            if message_ids:
+                message_placeholders = ",".join("?" for _ in message_ids)
+                self.ctx.conn.execute(
+                    f"DELETE FROM message_attachments WHERE message_id IN ({message_placeholders})",
+                    tuple(message_ids),
+                )
+
+            self.ctx.conn.execute("DELETE FROM messages WHERE conversation_id=?", (conversation_id,))
+            self.ctx.conn.execute("DELETE FROM events WHERE conversation_id=?", (conversation_id,))
+            self.ctx.conn.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
+
+            active_row = self.ctx.conn.execute(
+                "SELECT value FROM project_meta WHERE key='active_conversation_id'",
+            ).fetchone()
+            current_active_id = str(active_row["value"]) if active_row and active_row["value"] is not None else ""
+            if current_active_id == conversation_id:
+                next_active_row = self.ctx.conn.execute(
+                    """
+                    SELECT id
+                    FROM conversations
+                    WHERE status='active'
+                    ORDER BY COALESCE(last_message_at, created_at) DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                ).fetchone()
+                next_active_id = str(next_active_row["id"]) if next_active_row is not None else ""
+                self.ctx.conn.execute(
+                    """
+                    INSERT INTO project_meta(key, value) VALUES('active_conversation_id', ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                    """,
+                    (next_active_id,),
+                )
+
+            active_after = self.ctx.conn.execute(
+                "SELECT value FROM project_meta WHERE key='active_conversation_id'",
+            ).fetchone()
+            active_after_id = (
+                str(active_after["value"]).strip()
+                if active_after and active_after["value"] is not None
+                else ""
+            )
+            self.ctx.conn.commit()
+
+        return {
+            "conversation_id": conversation_id,
+            "active_conversation_id": active_after_id or None,
+        }
+
     def fork_conversation(self, conversation_id: str, *, from_message_id: str | None, title: str | None) -> dict[str, Any] | None:
         source = self.get_conversation(conversation_id)
         if not source:
@@ -448,31 +536,49 @@ class ProjectRepository:
     ) -> dict[str, Any]:
         msg_id = make_id("msg")
         now = created_at or utc_now_iso()
-        sequence = self.next_sequence_no(conversation_id)
+        with self.ctx.lock:
+            row = self.ctx.conn.execute(
+                "SELECT COALESCE(MAX(sequence_no), 0) AS seq FROM messages WHERE conversation_id=?",
+                (conversation_id,),
+            ).fetchone()
+            sequence = int(row["seq"]) + 1 if row else 1
 
-        self._execute(
-            """
-            INSERT INTO messages(
-              id, conversation_id, role, content, parts_json,
-              parent_message_id, sequence_no, superseded_by, metadata_json, created_at
+            self.ctx.conn.execute(
+                """
+                INSERT INTO messages(
+                  id, conversation_id, role, content, parts_json,
+                  parent_message_id, sequence_no, superseded_by, metadata_json, created_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                """,
+                (
+                    msg_id,
+                    conversation_id,
+                    role,
+                    content,
+                    dumps_json(parts or []),
+                    parent_message_id,
+                    sequence,
+                    dumps_json(metadata or {}),
+                    now,
+                ),
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-            """,
-            (
-                msg_id,
-                conversation_id,
-                role,
-                content,
-                dumps_json(parts or []),
-                parent_message_id,
-                sequence,
-                dumps_json(metadata or {}),
-                now,
-            ),
-        )
+            self.ctx.conn.execute("UPDATE conversations SET last_message_at=? WHERE id=?", (now, conversation_id))
+            self.ctx.conn.commit()
+            created = self.ctx.conn.execute(
+                """
+                SELECT id, conversation_id, role, content, parts_json, parent_message_id,
+                       sequence_no, superseded_by, metadata_json, created_at
+                FROM messages
+                WHERE conversation_id=? AND id=?
+                """,
+                (conversation_id, msg_id),
+            ).fetchone()
 
-        self._execute("UPDATE conversations SET last_message_at=? WHERE id=?", (now, conversation_id))
-        return self.get_message(conversation_id, msg_id)  # type: ignore[return-value]
+        created_dict = _row_to_dict(created)
+        if created_dict is None:
+            raise RuntimeError("Failed to load created message")
+        return self._message_row_to_view(created_dict)
 
     def get_message(self, conversation_id: str, message_id: str) -> dict[str, Any] | None:
         row = self._fetchone(
@@ -989,6 +1095,44 @@ class ProjectRepository:
             (embed_id, chunk_id, asset_id, dumps_json(vector), len(vector), now),
         )
         return chunk_id, embed_id
+
+    def replace_asset_index(
+        self,
+        *,
+        asset_id: str,
+        source_type: str,
+        source_ref: str | None,
+        chunks: list[tuple[str, int, list[float]]],
+    ) -> None:
+        with self.ctx.lock:
+            now = utc_now_iso()
+            self.ctx.conn.execute("DELETE FROM embeddings WHERE asset_id=?", (asset_id,))
+            self.ctx.conn.execute("DELETE FROM chunks WHERE asset_id=?", (asset_id,))
+
+            for text, token_count, vector in chunks:
+                chunk_id = make_id("chunk")
+                embed_id = make_id("emb")
+                self.ctx.conn.execute(
+                    """
+                    INSERT INTO chunks(id, asset_id, source_type, source_ref, text, token_count, created_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (chunk_id, asset_id, source_type, source_ref, text, token_count, now),
+                )
+                self.ctx.conn.execute(
+                    """
+                    INSERT INTO embeddings(id, chunk_id, asset_id, vector_json, dim, created_at)
+                    VALUES(?, ?, ?, ?, ?, ?)
+                    """,
+                    (embed_id, chunk_id, asset_id, dumps_json(vector), len(vector), now),
+                )
+
+            indexed_at = utc_now_iso()
+            self.ctx.conn.execute(
+                "UPDATE assets SET indexed_at=?, updated_at=?, last_error=NULL WHERE id=?",
+                (indexed_at, indexed_at, asset_id),
+            )
+            self.ctx.conn.commit()
 
     def list_embeddings(self) -> list[dict[str, Any]]:
         rows = self._fetchall(

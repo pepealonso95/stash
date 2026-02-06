@@ -483,21 +483,29 @@ final class AppViewModel: ObservableObject {
 
         quickActionsIndexMonitorTask = Task { [weak self] in
             guard let self else { return }
+            var transientFailures = 0
             for _ in 0 ..< 160 {
                 if Task.isCancelled { return }
                 guard self.project?.id == projectID else { return }
                 do {
                     let job = try await self.client.indexJob(projectID: projectID, jobID: jobID)
+                    transientFailures = 0
                     let status = job.status.lowercased()
                     if status == "done" || status == "failed" || status == "cancelled" {
                         await self.refreshQuickActionsIndexed()
                         return
                     }
                 } catch {
-                    return
+                    transientFailures += 1
+                    if transientFailures >= 6 {
+                        break
+                    }
                 }
                 try? await Task.sleep(for: .milliseconds(800))
             }
+            guard !Task.isCancelled else { return }
+            guard self.project?.id == projectID else { return }
+            await self.refreshQuickActionsIndexed()
         }
     }
 
@@ -608,8 +616,25 @@ final class AppViewModel: ObservableObject {
         let newTab: WorkspaceTab
         if mode == .preview {
             if let previewIndex = workspaceTabs.firstIndex(where: { $0.isPreview && !$0.isPinned }) {
-                workspaceTabs[previewIndex].isPinned = true
-                workspaceTabs[previewIndex].isPreview = false
+                let replacedPath = workspaceTabs[previewIndex].relativePath
+                let replacement = WorkspaceTab.make(
+                    relativePath: relativePath,
+                    fileKind: fileKind,
+                    isPreview: true,
+                    isPinned: false
+                )
+                workspaceTabs[previewIndex] = replacement
+                activeTabID = replacement.id
+                if !workspaceTabs.contains(where: { $0.relativePath == replacedPath }) {
+                    documentBuffers.removeValue(forKey: replacedPath)
+                    autosaveTasksByPath[replacedPath]?.cancel()
+                    autosaveTasksByPath[replacedPath] = nil
+                    externallyChangedBufferPaths.remove(replacedPath)
+                }
+                ensureDocumentBufferLoaded(relativePath: relativePath, fileKind: fileKind, itemURL: itemURL, item: fileItem)
+                persistTabsForProject()
+                setWorkspaceStatus("Previewing \(fileItem.name)")
+                return
             }
             newTab = WorkspaceTab.make(
                 relativePath: relativePath,
@@ -1325,6 +1350,10 @@ final class AppViewModel: ObservableObject {
             return
         }
 
+        if await restoreActiveProjectFromBackend() {
+            return
+        }
+
         if let bookmarkData = defaults.data(forKey: lastProjectBookmarkKey),
            let restored = resolveBookmarkedProjectURL(from: bookmarkData),
            FileManager.default.fileExists(atPath: restored.url.path)
@@ -1337,6 +1366,31 @@ final class AppViewModel: ObservableObject {
            FileManager.default.fileExists(atPath: lastPath)
         {
             errorText = "Re-select your project folder once so macOS can grant persistent access."
+        }
+    }
+
+    private func restoreActiveProjectFromBackend() async -> Bool {
+        guard backendConnected else { return false }
+        do {
+            let active = try await client.activeProject()
+            guard let activeProjectID = active.activeProjectId, !activeProjectID.isEmpty else {
+                return false
+            }
+            let projects = try await client.listProjects()
+            guard let activeProject = projects.first(where: { $0.id == activeProjectID }) else {
+                return false
+            }
+
+            let activeRootURL = URL(fileURLWithPath: activeProject.rootPath, isDirectory: true).standardizedFileURL
+            let previousError = errorText
+            await openProject(url: activeRootURL)
+            if project?.id == activeProjectID {
+                return true
+            }
+            errorText = previousError
+            return false
+        } catch {
+            return false
         }
     }
 
@@ -2009,6 +2063,44 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func deleteConversation(id: String) async {
+        guard let projectID = project?.id else {
+            errorText = "Open a project before deleting a chat"
+            return
+        }
+
+        guard conversations.contains(where: { $0.id == id }) else { return }
+        if runInProgress, selectedConversationID == id {
+            errorText = "Wait for the current run to finish before deleting this chat."
+            return
+        }
+
+        let wasSelected = selectedConversationID == id
+        if wasSelected {
+            detachRunTrackingFromCurrentConversation()
+            selectedConversationID = nil
+            messages = []
+            clearPendingRunConfirmation()
+            resetRunFeedback(clearEvents: true)
+            runInProgress = false
+            runStatusText = nil
+            activeRunID = nil
+        }
+
+        do {
+            let result = try await client.deleteConversation(projectID: projectID, conversationID: id)
+            conversations.removeAll { $0.id == id }
+            if let activeID = result.activeConversationId, !activeID.isEmpty {
+                selectedConversationID = activeID
+            }
+            await refreshConversations()
+            errorText = nil
+        } catch {
+            errorText = "Could not delete chat: \(error.localizedDescription)"
+            await refreshConversations()
+        }
+    }
+
     func selectConversation(id: String) async {
         detachRunTrackingFromCurrentConversation()
         selectedConversationID = id
@@ -2436,6 +2528,12 @@ final class AppViewModel: ObservableObject {
         runProgressCompletedSteps = 0
     }
 
+    private func setTerminalRunPhase(phase: String, label: String) {
+        resetRunProgressState()
+        runCurrentPhase = phase
+        runPhaseLabel = label
+    }
+
     private func clearPendingRunConfirmation() {
         pendingRunConfirmationID = nil
         pendingRunRequiresConfirmation = false
@@ -2516,6 +2614,7 @@ final class AppViewModel: ObservableObject {
                 await loadMessages(conversationID: conversationID)
             }
             runStatusText = "Changes applied"
+            setTerminalRunPhase(phase: "completed", label: "Changes applied")
             appendRunFeedbackEvent(type: "status", title: "Changes applied")
             errorText = nil
         } catch {
@@ -2540,6 +2639,7 @@ final class AppViewModel: ObservableObject {
                 await loadMessages(conversationID: conversationID)
             }
             runStatusText = "Changes discarded"
+            setTerminalRunPhase(phase: "completed", label: "Changes discarded")
             appendRunFeedbackEvent(type: "status", title: "Changes discarded")
             errorText = nil
         } catch {
@@ -2766,16 +2866,14 @@ final class AppViewModel: ObservableObject {
             runThinkingText = nil
             runPlanningText = "Run completed."
             clearPendingRunConfirmation()
-            runCurrentPhase = "completed"
-            runPhaseLabel = "Run completed"
+            setTerminalRunPhase(phase: "completed", label: "Run completed")
             appendRunFeedbackEvent(type: "status", title: "Run completed", detail: nil, timestampISO: event.ts)
 
         case "run_failed":
             runThinkingText = nil
             runPlanningText = "Run failed."
             clearPendingRunConfirmation()
-            runCurrentPhase = "failed"
-            runPhaseLabel = "Run failed"
+            setTerminalRunPhase(phase: "failed", label: "Run failed")
             let failures = event.payload["failures"]?.intValue
             let detail = failures != nil ? "\(failures ?? 0) step(s) failed" : nil
             appendRunFeedbackEvent(type: "error", title: "Run failed", detail: detail, timestampISO: event.ts)
@@ -2803,11 +2901,13 @@ final class AppViewModel: ObservableObject {
         case "run_applied":
             clearPendingRunConfirmation()
             runPlanningText = "Changes applied."
+            setTerminalRunPhase(phase: "completed", label: "Changes applied")
             appendRunFeedbackEvent(type: "status", title: "Changes applied", detail: nil, timestampISO: event.ts)
 
         case "run_discarded":
             clearPendingRunConfirmation()
             runPlanningText = "Changes discarded."
+            setTerminalRunPhase(phase: "completed", label: "Changes discarded")
             appendRunFeedbackEvent(type: "status", title: "Changes discarded", detail: nil, timestampISO: event.ts)
 
         case "run_latency_summary":
@@ -2828,6 +2928,7 @@ final class AppViewModel: ObservableObject {
             runThinkingText = nil
             runPlanningText = "Run cancelled."
             clearPendingRunConfirmation()
+            setTerminalRunPhase(phase: "completed", label: "Run cancelled")
             appendRunFeedbackEvent(type: "status", title: "Run cancelled", detail: nil, timestampISO: event.ts)
 
         default:
@@ -3018,9 +3119,15 @@ final class AppViewModel: ObservableObject {
                     if ["done", "failed", "cancelled"].contains(status) {
                         await MainActor.run {
                             self.clearPendingRunConfirmation()
-                        }
-                        await MainActor.run {
                             self.runStatusText = run.status.uppercased() + (run.error.map { ": \($0)" } ?? "")
+                            switch status {
+                            case "failed":
+                                self.setTerminalRunPhase(phase: "failed", label: "Run failed")
+                            case "cancelled":
+                                self.setTerminalRunPhase(phase: "completed", label: "Run cancelled")
+                            default:
+                                self.setTerminalRunPhase(phase: "completed", label: "Run completed")
+                            }
                         }
                         if self.selectedConversationID == conversationID {
                             await self.loadMessages(conversationID: conversationID)
@@ -3095,9 +3202,15 @@ final class AppViewModel: ObservableObject {
                 if ["done", "failed", "cancelled"].contains(finalStatus) {
                     await MainActor.run {
                         self.clearPendingRunConfirmation()
-                    }
-                    await MainActor.run {
                         self.runStatusText = finalRun.status.uppercased() + (finalRun.error.map { ": \($0)" } ?? "")
+                        switch finalStatus {
+                        case "failed":
+                            self.setTerminalRunPhase(phase: "failed", label: "Run failed")
+                        case "cancelled":
+                            self.setTerminalRunPhase(phase: "completed", label: "Run cancelled")
+                        default:
+                            self.setTerminalRunPhase(phase: "completed", label: "Run completed")
+                        }
                     }
                     if self.selectedConversationID == conversationID {
                         await self.loadMessages(conversationID: conversationID)

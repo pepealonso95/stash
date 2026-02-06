@@ -2028,13 +2028,15 @@ class RunOrchestrator:
 
         except asyncio.CancelledError:
             with context.lock:
-                repo.update_run(run_id, status="cancelled", finished=True)
-                repo.add_event(
-                    "run_cancelled",
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    payload={"reason": "cancelled"},
-                )
+                current = repo.get_run(run_id)
+                if current and current.get("status") != "cancelled":
+                    repo.update_run(run_id, status="cancelled", finished=True)
+                    repo.add_event(
+                        "run_cancelled",
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        payload={"reason": "cancelled"},
+                    )
             if preview_root is not None:
                 self._cleanup_preview_workspace(context, run_id)
             raise

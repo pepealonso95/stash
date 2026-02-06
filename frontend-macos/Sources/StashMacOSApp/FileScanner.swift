@@ -3,7 +3,9 @@ import Foundation
 struct FileScanner {
     static func scan(rootURL: URL) -> [FileItem] {
         var files: [FileItem] = []
-        let rootPath = rootURL.path
+        let normalizedRoot = rootURL.standardizedFileURL
+        let rootPath = normalizedRoot.path
+        let resolvedRootPath = normalizedRoot.resolvingSymlinksInPath().path
         let fm = FileManager.default
 
         guard let enumerator = fm.enumerator(
@@ -22,7 +24,11 @@ struct FileScanner {
                 continue
             }
 
-            let relative = url.path.replacingOccurrences(of: rootPath + "/", with: "")
+            let relative = relativePath(
+                for: url,
+                rootPath: rootPath,
+                resolvedRootPath: resolvedRootPath
+            )
             if relative.isEmpty {
                 continue
             }
@@ -88,5 +94,33 @@ struct FileScanner {
             return ""
         }
         return parts.dropLast().joined(separator: "/")
+    }
+
+    private static func relativePath(for url: URL, rootPath: String, resolvedRootPath: String) -> String {
+        let candidatePaths = [
+            url.standardizedFileURL.path,
+            url.resolvingSymlinksInPath().standardizedFileURL.path,
+            url.path,
+        ]
+        for candidate in candidatePaths {
+            if let trimmed = trimPrefix(candidate, prefix: rootPath), !trimmed.isEmpty {
+                return trimmed
+            }
+            if let trimmed = trimPrefix(candidate, prefix: resolvedRootPath), !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return ""
+    }
+
+    private static func trimPrefix(_ value: String, prefix: String) -> String? {
+        if value == prefix {
+            return ""
+        }
+        let normalizedPrefix = prefix.hasSuffix("/") ? prefix : prefix + "/"
+        guard value.hasPrefix(normalizedPrefix) else {
+            return nil
+        }
+        return String(value.dropFirst(normalizedPrefix.count))
     }
 }

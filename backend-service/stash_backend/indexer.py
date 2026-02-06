@@ -127,18 +127,21 @@ class IndexingService:
             repo.set_asset_error(asset_id, "No chunks created")
             return {"asset_id": asset_id, "status": "skipped", "error": "no chunks"}
 
-        repo.clear_asset_index(asset_id)
-        for index, chunk in enumerate(chunks):
-            vector = self.embedder.embed(chunk)
-            repo.insert_chunk_with_embedding(
-                asset_id=asset_id,
-                source_type=asset["kind"],
-                source_ref=source_ref,
-                text=chunk,
-                token_count=max(1, len(chunk.split())),
-                vector=vector,
+        prepared_chunks: list[tuple[str, int, list[float]]] = []
+        for chunk in chunks:
+            prepared_chunks.append(
+                (
+                    chunk,
+                    max(1, len(chunk.split())),
+                    self.embedder.embed(chunk),
+                )
             )
-        repo.set_asset_indexed(asset_id)
+        repo.replace_asset_index(
+            asset_id=asset_id,
+            source_type=asset["kind"],
+            source_ref=source_ref,
+            chunks=prepared_chunks,
+        )
         return {"asset_id": asset_id, "status": "indexed", "chunks": len(chunks)}
 
     def scan_project_files(self, context: ProjectContext, repo: ProjectRepository) -> dict[str, Any]:

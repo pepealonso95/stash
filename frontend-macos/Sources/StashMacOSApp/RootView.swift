@@ -325,6 +325,7 @@ private struct ChatPanel: View {
     @State private var runDetailsExpanded = false
     @State private var hideDoneInline = false
     @State private var doneRowGeneration = 0
+    @State private var pendingConversationDeletion: Conversation?
     @FocusState private var composerFocused: Bool
 
     private var shouldShowInlineRunRow: Bool {
@@ -356,6 +357,13 @@ private struct ChatPanel: View {
                     Divider()
                     Button("New Chat") {
                         Task { await viewModel.createConversation() }
+                    }
+                    if let selectedConversation = viewModel.selectedConversation {
+                        Button(role: .destructive) {
+                            pendingConversationDeletion = selectedConversation
+                        } label: {
+                            Text("Delete Current Chat")
+                        }
                     }
                 } label: {
                     HStack(spacing: 6) {
@@ -504,6 +512,28 @@ private struct ChatPanel: View {
         }
         .onChange(of: viewModel.composerFocusToken) {
             composerFocused = true
+        }
+        .alert(
+            "Delete chat?",
+            isPresented: Binding(
+                get: { pendingConversationDeletion != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        pendingConversationDeletion = nil
+                    }
+                }
+            ),
+            presenting: pendingConversationDeletion
+        ) { conversation in
+            Button("Delete", role: .destructive) {
+                pendingConversationDeletion = nil
+                Task { await viewModel.deleteConversation(id: conversation.id) }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingConversationDeletion = nil
+            }
+        } message: { conversation in
+            Text("Permanently delete \"\(conversation.title)\" and all related messages and runs?")
         }
     }
 }

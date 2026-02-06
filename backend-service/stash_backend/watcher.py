@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from .db import ProjectRepository
@@ -8,6 +9,8 @@ from .indexer import IndexingService
 from .project_store import ProjectStore
 from .types import IndexJob
 from .utils import make_id, utc_now_iso
+
+logger = logging.getLogger(__name__)
 
 
 class WatcherService:
@@ -20,11 +23,15 @@ class WatcherService:
         self._index_tasks: dict[str, asyncio.Task[None]] = {}
 
     def ensure_project_watch(self, project_id: str) -> None:
-        if project_id in self._watch_tasks:
+        existing = self._watch_tasks.get(project_id)
+        if existing is not None and not existing.done():
             return
+        if existing is not None and existing.done():
+            self._watch_tasks.pop(project_id, None)
 
         task = asyncio.create_task(self._watch_loop(project_id))
         self._watch_tasks[project_id] = task
+        task.add_done_callback(lambda done, pid=project_id: self._on_watch_task_done(pid, done))
 
     async def stop(self) -> None:
         for task in list(self._watch_tasks.values()):
@@ -46,7 +53,14 @@ class WatcherService:
                     return
 
                 repo = ProjectRepository(context)
-                result = await asyncio.to_thread(self.indexer.scan_project_files, context, repo)
+                try:
+                    result = await asyncio.to_thread(self.indexer.scan_project_files, context, repo)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Watcher scan failed project_id=%s", project_id)
+                    await asyncio.sleep(self.scan_interval_seconds)
+                    continue
                 if result["indexed"] or result["removed"]:
                     with context.lock:
                         repo.add_event(
@@ -62,6 +76,20 @@ class WatcherService:
                 await asyncio.sleep(self.scan_interval_seconds)
         except asyncio.CancelledError:
             return
+
+    def _on_watch_task_done(self, project_id: str, task: asyncio.Task[None]) -> None:
+        current = self._watch_tasks.get(project_id)
+        if current is task:
+            self._watch_tasks.pop(project_id, None)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "Watcher task crashed project_id=%s",
+                project_id,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     def start_full_reindex(self, project_id: str) -> IndexJob:
         context = self.project_store.get(project_id)

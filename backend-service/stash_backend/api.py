@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
@@ -18,6 +20,7 @@ from .schemas import (
     CodexExecuteRequest,
     CodexExecuteResponse,
     ConversationCreateRequest,
+    ConversationDeleteResponse,
     ConversationForkRequest,
     ConversationPatchRequest,
     ConversationResponse,
@@ -40,8 +43,68 @@ from .schemas import (
 )
 from .service_container import Services
 
+logger = logging.getLogger(__name__)
+
+
+def _ensure_active_project_loaded(services: Services, *, requested_project_id: str | None = None) -> None:
+    cfg = services.runtime_config.get()
+    target_project_id = requested_project_id or cfg.active_project_id
+    if not target_project_id:
+        return
+    if services.project_store.get(target_project_id) is not None:
+        return
+
+    # Runtime config can only auto-load the configured active project.
+    if cfg.active_project_id != target_project_id:
+        return
+
+    root_text = (cfg.active_project_root_path or "").strip()
+    if not root_text:
+        return
+
+    root = Path(root_text).expanduser().resolve()
+    if not root.exists():
+        logger.warning(
+            "Active project root no longer exists. Clearing runtime selection project_id=%s root=%s",
+            target_project_id,
+            root_text,
+        )
+        services.runtime_config.update(
+            clear_active_project_id=True,
+            clear_active_project_root_path=True,
+        )
+        return
+
+    try:
+        context = services.project_store.open_or_create(
+            name=root.name or "Project",
+            root_path=str(root),
+        )
+    except PermissionError:
+        logger.warning(
+            "Could not auto-load active project due to permissions project_id=%s root=%s",
+            target_project_id,
+            root_text,
+        )
+        return
+    except Exception:
+        logger.exception(
+            "Could not auto-load active project project_id=%s root=%s",
+            target_project_id,
+            root_text,
+        )
+        return
+
+    services.watcher.ensure_project_watch(context.project_id)
+    if context.project_id != target_project_id or str(context.root_path) != root_text:
+        services.runtime_config.update(
+            active_project_id=context.project_id,
+            active_project_root_path=str(context.root_path),
+        )
+
 
 def _repo_or_404(services: Services, project_id: str) -> tuple[Any, ProjectRepository]:
+    _ensure_active_project_loaded(services, requested_project_id=project_id)
     context = services.project_store.get(project_id)
     if context is None:
         raise HTTPException(status_code=404, detail="Project not loaded")
@@ -97,7 +160,9 @@ def create_app(services: Services) -> FastAPI:
             execution_parallel_reads_enabled=request.execution_parallel_reads_enabled,
             execution_parallel_reads_max_workers=request.execution_parallel_reads_max_workers,
             active_project_id=request.active_project_id,
+            active_project_root_path=request.active_project_root_path,
             clear_active_project_id=request.clear_active_project_id,
+            clear_active_project_root_path=request.clear_active_project_root_path,
             openai_api_key=request.openai_api_key,
             clear_openai_api_key=request.clear_openai_api_key,
             openai_model=request.openai_model,
@@ -108,19 +173,33 @@ def create_app(services: Services) -> FastAPI:
 
     @app.get("/v1/runtime/active-project", response_model=ActiveProjectResponse)
     async def get_active_project() -> ActiveProjectResponse:
+        _ensure_active_project_loaded(services)
         cfg = services.runtime_config.get()
-        return ActiveProjectResponse(active_project_id=cfg.active_project_id)
+        return ActiveProjectResponse(
+            active_project_id=cfg.active_project_id,
+            active_project_root_path=cfg.active_project_root_path,
+        )
 
     @app.put("/v1/runtime/active-project", response_model=ActiveProjectResponse)
     async def put_active_project(request: ActiveProjectUpdateRequest) -> ActiveProjectResponse:
         project_id = request.project_id.strip() if request.project_id else None
-        if project_id and services.project_store.get(project_id) is None:
-            raise HTTPException(status_code=404, detail="Project not loaded")
+        project_root_path: str | None = None
+        if project_id:
+            _ensure_active_project_loaded(services, requested_project_id=project_id)
+            context = services.project_store.get(project_id)
+            if context is None:
+                raise HTTPException(status_code=404, detail="Project not loaded")
+            project_root_path = str(context.root_path)
         services.runtime_config.update(
             active_project_id=project_id,
+            active_project_root_path=project_root_path,
             clear_active_project_id=not bool(project_id),
+            clear_active_project_root_path=not bool(project_id),
         )
-        return ActiveProjectResponse(active_project_id=project_id)
+        return ActiveProjectResponse(
+            active_project_id=project_id,
+            active_project_root_path=project_root_path,
+        )
 
     @app.get("/v1/runtime/setup-status")
     async def runtime_setup_status() -> dict[str, Any]:
@@ -140,7 +219,10 @@ def create_app(services: Services) -> FastAPI:
             repo.create_conversation("General")
 
         services.watcher.ensure_project_watch(context.project_id)
-        services.runtime_config.update(active_project_id=context.project_id)
+        services.runtime_config.update(
+            active_project_id=context.project_id,
+            active_project_root_path=str(context.root_path),
+        )
 
         project = repo.project_view()
         project["permission"] = asdict(context.permission) if context.permission else None
@@ -148,6 +230,7 @@ def create_app(services: Services) -> FastAPI:
 
     @app.get("/v1/projects", response_model=list[ProjectResponse])
     async def list_projects() -> list[ProjectResponse]:
+        _ensure_active_project_loaded(services)
         responses: list[ProjectResponse] = []
         for context in services.project_store.list_projects():
             repo = ProjectRepository(context)
@@ -215,6 +298,48 @@ def create_app(services: Services) -> FastAPI:
             raise HTTPException(status_code=404, detail="Conversation not found")
         repo.add_event("conversation_updated", conversation_id=conversation_id, payload=updated)
         return ConversationResponse(**updated)
+
+    @app.delete("/v1/projects/{project_id}/conversations/{conversation_id}", response_model=ConversationDeleteResponse)
+    async def delete_conversation(project_id: str, conversation_id: str) -> ConversationDeleteResponse:
+        _context, repo = _repo_or_404(services, project_id)
+        _conversation_or_404(repo, conversation_id)
+
+        active_run_ids = set(services.orchestrator._tasks.keys())
+        conversation_run_ids = set(repo.list_run_ids_for_conversation(conversation_id))
+        if active_run_ids.intersection(conversation_run_ids):
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot delete chat while a run is active. Cancel the run and retry.",
+            )
+
+        deleted = repo.delete_conversation(conversation_id)
+        if deleted is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        active_conversation_id = deleted.get("active_conversation_id")
+        if not active_conversation_id:
+            remaining = repo.list_conversations(status="active", limit=1)
+            if not remaining:
+                created = repo.create_conversation("General")
+                active_conversation_id = created["id"]
+                repo.add_event(
+                    "conversation_created",
+                    conversation_id=created["id"],
+                    payload={"title": created["title"], "reason": "auto_after_delete"},
+                )
+
+        repo.add_event(
+            "conversation_deleted",
+            payload={
+                "conversation_id": conversation_id,
+                "active_conversation_id": active_conversation_id,
+            },
+        )
+        return ConversationDeleteResponse(
+            deleted=True,
+            conversation_id=conversation_id,
+            active_conversation_id=active_conversation_id,
+        )
 
     @app.post("/v1/projects/{project_id}/conversations/{conversation_id}/fork", response_model=ConversationResponse)
     async def fork_conversation(project_id: str, conversation_id: str, request: ConversationForkRequest) -> ConversationResponse:

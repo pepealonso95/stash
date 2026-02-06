@@ -19,11 +19,17 @@ final class DocumentContextDetector {
     private var currentDocument: DetectedDocumentContext?
     private var accessibilityTrusted = AXIsProcessTrusted()
 
+    // Keep in sync with backend text index support to avoid suggesting
+    // "attach and chat" flows for files that cannot be indexed locally.
     private let supportedFileExtensions: Set<String> = [
-        "pdf",
-        "doc", "docx",
-        "odt", "rtf", "txt", "md",
-        "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "heic", "webp"
+        "txt", "md", "rst",
+        "py", "json", "yaml", "yml", "toml", "ini", "cfg",
+        "csv", "tsv",
+        "js", "ts", "tsx", "jsx",
+        "swift", "java", "go", "rs",
+        "c", "cpp", "h", "hpp",
+        "html", "css", "sql",
+        "sh", "zsh",
     ]
 
     init(workspace: NSWorkspace = .shared) {

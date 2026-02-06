@@ -31,6 +31,7 @@ class RuntimeConfig:
     execution_parallel_reads_enabled: bool = True
     execution_parallel_reads_max_workers: int = 3
     active_project_id: str | None = None
+    active_project_root_path: str | None = None
     openai_api_key: str | None = None
     openai_model: str = "gpt-5"
     openai_base_url: str = "https://api.openai.com/v1"
@@ -89,6 +90,7 @@ class RuntimeConfigStore:
             "execution_parallel_reads_enabled": cfg.execution_parallel_reads_enabled,
             "execution_parallel_reads_max_workers": cfg.execution_parallel_reads_max_workers,
             "active_project_id": cfg.active_project_id,
+            "active_project_root_path": cfg.active_project_root_path,
             "openai_api_key_set": bool(cfg.openai_api_key),
             "openai_model": cfg.openai_model,
             "openai_base_url": cfg.openai_base_url,
@@ -111,7 +113,9 @@ class RuntimeConfigStore:
         execution_parallel_reads_enabled: bool | None = None,
         execution_parallel_reads_max_workers: int | None = None,
         active_project_id: str | None = None,
+        active_project_root_path: str | None = None,
         clear_active_project_id: bool = False,
+        clear_active_project_root_path: bool = False,
         openai_api_key: str | None = None,
         clear_openai_api_key: bool = False,
         openai_model: str | None = None,
@@ -176,9 +180,18 @@ class RuntimeConfigStore:
 
             if clear_active_project_id:
                 next_cfg.active_project_id = None
+                next_cfg.active_project_root_path = None
             elif active_project_id is not None:
                 cleaned = active_project_id.strip()
                 next_cfg.active_project_id = cleaned or None
+                if not cleaned:
+                    next_cfg.active_project_root_path = None
+
+            if clear_active_project_root_path:
+                next_cfg.active_project_root_path = None
+            elif active_project_root_path is not None:
+                cleaned = active_project_root_path.strip()
+                next_cfg.active_project_root_path = cleaned or None
 
             if clear_openai_api_key:
                 next_cfg.openai_api_key = None
@@ -232,6 +245,7 @@ class RuntimeConfigStore:
                 execution_parallel_reads_enabled=parsed.get("execution_parallel_reads_enabled"),
                 execution_parallel_reads_max_workers=parsed.get("execution_parallel_reads_max_workers"),
                 active_project_id=parsed.get("active_project_id"),
+                active_project_root_path=parsed.get("active_project_root_path"),
                 openai_api_key=parsed.get("openai_api_key"),
                 openai_model=parsed.get("openai_model"),
                 openai_base_url=parsed.get("openai_base_url"),

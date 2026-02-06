@@ -132,6 +132,10 @@ struct BackendClient {
         return try await request(path: "/v1/projects", method: "POST", body: Payload(name: name, rootPath: rootPath))
     }
 
+    func listProjects() async throws -> [Project] {
+        try await request(path: "/v1/projects", method: "GET", body: Optional<Int>.none)
+    }
+
     func listConversations(projectID: String) async throws -> [Conversation] {
         try await request(path: "/v1/projects/\(projectID)/conversations", method: "GET", body: Optional<Int>.none)
     }
@@ -145,6 +149,14 @@ struct BackendClient {
             path: "/v1/projects/\(projectID)/conversations",
             method: "POST",
             body: Payload(title: title, startMode: "manual")
+        )
+    }
+
+    func deleteConversation(projectID: String, conversationID: String) async throws -> ConversationDeletePayload {
+        try await request(
+            path: "/v1/projects/\(projectID)/conversations/\(conversationID)",
+            method: "DELETE",
+            body: Optional<Int>.none
         )
     }
 
