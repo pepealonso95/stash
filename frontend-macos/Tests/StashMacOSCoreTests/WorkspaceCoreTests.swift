@@ -1,0 +1,97 @@
+import Foundation
+import XCTest
+@testable import StashMacOSCore
+
+final class WorkspaceCoreTests: XCTestCase {
+    func testFileKindDetection() {
+        XCTAssertEqual(FileKindDetector.detect(pathExtension: "md", isBinary: false), .markdown)
+        XCTAssertEqual(FileKindDetector.detect(pathExtension: "csv", isBinary: false), .csv)
+        XCTAssertEqual(FileKindDetector.detect(pathExtension: "swift", isBinary: false), .code)
+        XCTAssertEqual(FileKindDetector.detect(pathExtension: "json", isBinary: false), .json)
+        XCTAssertEqual(FileKindDetector.detect(pathExtension: "png", isBinary: false), .image)
+        XCTAssertEqual(FileKindDetector.detect(pathExtension: "pdf", isBinary: false), .pdf)
+        XCTAssertEqual(FileKindDetector.detect(pathExtension: "docx", isBinary: false), .office)
+        XCTAssertEqual(FileKindDetector.detect(pathExtension: "bin", isBinary: true), .binary)
+    }
+
+    func testCSVRoundTrip() {
+        let rows = [["name", "notes"], ["alpha", "hello, world"], ["beta", "line1\nline2"], ["gamma", "quote \"inside\""]]
+        let encoded = CSVCodec.encode(rows)
+        let decoded = CSVCodec.parse(encoded)
+        XCTAssertEqual(decoded, rows)
+    }
+
+    func testWorkspacePathValidator() {
+        let root = URL(fileURLWithPath: "/tmp/stash-root", isDirectory: true)
+        let inside = root.appendingPathComponent("docs/notes.md")
+        let outside = URL(fileURLWithPath: "/tmp/stash-root-outside/docs.md")
+
+        XCTAssertTrue(WorkspacePathValidator.isInsideProject(candidate: inside, root: root))
+        XCTAssertFalse(WorkspacePathValidator.isInsideProject(candidate: outside, root: root))
+        XCTAssertTrue(WorkspacePathValidator.isDescendant(inside, of: root))
+        XCTAssertFalse(WorkspacePathValidator.isDescendant(root, of: inside))
+    }
+
+    @MainActor
+    func testPreviewTabReplacementAndPinning() throws {
+        let temp = try makeTempProject()
+        defer { try? FileManager.default.removeItem(at: temp) }
+
+        try "alpha".write(to: temp.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try "bravo".write(to: temp.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+
+        let viewModel = AppViewModel()
+        viewModel.project = Project(id: "proj", name: "proj", rootPath: temp.path, createdAt: nil, lastOpenedAt: nil, activeConversationId: nil)
+        viewModel.projectRootURL = temp
+        viewModel.files = FileScanner.scan(rootURL: temp)
+
+        viewModel.openFile(relativePath: "a.txt", mode: .preview)
+        XCTAssertEqual(viewModel.workspaceTabs.count, 1)
+        XCTAssertEqual(viewModel.workspaceTabs.first?.relativePath, "a.txt")
+        XCTAssertTrue(viewModel.workspaceTabs.first?.isPreview == true)
+
+        viewModel.openFile(relativePath: "b.txt", mode: .preview)
+        XCTAssertEqual(viewModel.workspaceTabs.count, 1)
+        XCTAssertEqual(viewModel.workspaceTabs.first?.relativePath, "b.txt")
+
+        viewModel.openFile(relativePath: "b.txt", mode: .pinned)
+        XCTAssertTrue(viewModel.workspaceTabs.first?.isPinned == true)
+        XCTAssertTrue(viewModel.workspaceTabs.first?.isPreview == false)
+
+        viewModel.openFile(relativePath: "a.txt", mode: .preview)
+        XCTAssertEqual(viewModel.workspaceTabs.count, 2)
+        XCTAssertEqual(viewModel.activeTab?.relativePath, "a.txt")
+    }
+
+    @MainActor
+    func testAutosaveStateTransition() async throws {
+        let temp = try makeTempProject()
+        defer { try? FileManager.default.removeItem(at: temp) }
+
+        let fileURL = temp.appendingPathComponent("notes.md")
+        try "initial".write(to: fileURL, atomically: true, encoding: .utf8)
+
+        let viewModel = AppViewModel()
+        viewModel.project = Project(id: "proj2", name: "proj2", rootPath: temp.path, createdAt: nil, lastOpenedAt: nil, activeConversationId: nil)
+        viewModel.projectRootURL = temp
+        viewModel.files = FileScanner.scan(rootURL: temp)
+
+        viewModel.openFile(relativePath: "notes.md", mode: .pinned)
+        viewModel.updateDocumentContent(relativePath: "notes.md", content: "changed")
+
+        XCTAssertEqual(viewModel.documentBuffers["notes.md"]?.isDirty, true)
+
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+        let diskText = try String(contentsOf: fileURL, encoding: .utf8)
+        XCTAssertEqual(diskText, "changed")
+        XCTAssertEqual(viewModel.documentBuffers["notes.md"]?.isDirty, false)
+    }
+
+    private func makeTempProject() throws -> URL {
+        let base = FileManager.default.temporaryDirectory
+        let url = base.appendingPathComponent("stash-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+}

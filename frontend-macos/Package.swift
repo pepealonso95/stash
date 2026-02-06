@@ -35,6 +35,11 @@ let package = Package(
             dependencies: ["StashMacOSCore"],
             path: "Sources/StashOverlay",
             resources: [.process("Resources")]
+        ),
+        .testTarget(
+            name: "StashMacOSCoreTests",
+            dependencies: ["StashMacOSCore"],
+            path: "Tests/StashMacOSCoreTests"
         )
     ]
 )

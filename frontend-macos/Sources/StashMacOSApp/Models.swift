@@ -249,10 +249,97 @@ struct RuntimeSetupStatus: Decodable {
     let blockers: [String]
 }
 
+enum ExplorerMode: String, CaseIterable, Codable, Hashable {
+    case tree
+    case folders
+
+    var title: String {
+        switch self {
+        case .tree:
+            return "Tree"
+        case .folders:
+            return "Folders"
+        }
+    }
+}
+
+enum FileOpenMode: String, Codable, Hashable {
+    case preview
+    case pinned
+}
+
+enum FileKind: String, Codable, Hashable {
+    case markdown
+    case text
+    case csv
+    case code
+    case json
+    case yaml
+    case xml
+    case image
+    case pdf
+    case office
+    case binary
+    case unknown
+
+    var isEditable: Bool {
+        switch self {
+        case .markdown, .text, .csv, .code, .json, .yaml, .xml:
+            return true
+        case .image, .pdf, .office, .binary, .unknown:
+            return false
+        }
+    }
+
+    var supportsQuickLook: Bool {
+        switch self {
+        case .image, .pdf, .office:
+            return true
+        case .markdown, .text, .csv, .code, .json, .yaml, .xml, .binary, .unknown:
+            return false
+        }
+    }
+}
+
+struct WorkspaceTab: Identifiable, Hashable, Codable {
+    let id: String
+    let relativePath: String
+    let title: String
+    let fileKind: FileKind
+    var isPreview: Bool
+    var isPinned: Bool
+
+    static func make(relativePath: String, fileKind: FileKind, isPreview: Bool, isPinned: Bool) -> WorkspaceTab {
+        WorkspaceTab(
+            id: UUID().uuidString,
+            relativePath: relativePath,
+            title: URL(fileURLWithPath: relativePath).lastPathComponent,
+            fileKind: fileKind,
+            isPreview: isPreview,
+            isPinned: isPinned
+        )
+    }
+}
+
+struct DocumentBuffer: Hashable {
+    let relativePath: String
+    let fileKind: FileKind
+    var content: String
+    var lastSavedContent: String
+    var isDirty: Bool
+    var isBinary: Bool
+    var fileSizeBytes: Int64?
+    var modifiedAt: Date?
+}
+
 struct FileItem: Identifiable, Hashable {
     let id: String
     let relativePath: String
     let name: String
     let depth: Int
     let isDirectory: Bool
+    let parentRelativePath: String
+    let pathExtension: String
+    let fileSizeBytes: Int64?
+    let modifiedAt: Date?
 }

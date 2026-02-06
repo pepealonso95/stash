@@ -75,11 +75,34 @@ This does a single local setup for the stack:
 - Uses app-managed runtime configuration (no `.env` setup required)
 - Optionally writes frontend config when `STASH_FRONTEND_CONFIG_PATH` is set
 
+## One Command To Run Everything
+
+From repo root:
+
+```bash
+./scripts/run_everything.sh
+```
+
+This single command:
+- Runs install automatically if `.venv/` does not exist
+- Starts backend + frontend stack
+
+Optional flags:
+- `--install` force reinstall before run
+- `--skip-install` skip install and only run
+
+If you are one level above the repo (`New project/`), use:
+
+```bash
+./run_stash.sh
+```
+
 Run commands:
 
 ```bash
 ./scripts/run_backend.sh
 ./scripts/run_stack.sh
+./scripts/run_everything.sh
 ./scripts/smoke_test_backend.sh
 ./scripts/integration_test_codex_cli_mock.sh
 ```
@@ -90,6 +113,7 @@ Equivalent `make` targets:
 make install
 make run-backend
 make run-stack
+make run-everything
 make smoke-test
 make integration-test-codex-cli
 make install-desktop

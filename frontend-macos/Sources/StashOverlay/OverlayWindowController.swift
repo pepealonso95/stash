@@ -12,6 +12,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     private var attachedDocumentKeys: Set<String> = []
     private var workspaceWindowControllers: [String: ProjectWorkspaceWindowController] = [:]
     private var activeWorkspaceProjectID: String?
+    private var onboardingWindowController: ProjectWorkspaceWindowController?
 
     init(viewModel: OverlayViewModel) {
         self.viewModel = viewModel
@@ -124,6 +125,11 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         await synchronizeSelectedProjectWithGlobalActive()
 
+        guard await viewModel.backendClient.hasVisibleProjects() else {
+            openOnboardingWorkspaceWindow()
+            return
+        }
+
         do {
             let project = try await viewModel.backendClient.resolveDropTargetProject(
                 preferredProjectID: activeWorkspaceProjectID
@@ -169,9 +175,14 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         }
 
         maybePromptForAccessibilityAccess()
-        shouldPresentProjectPickerOnActivate = true
         Task { @MainActor [weak self] in
-            await self?.synchronizeSelectedProjectWithGlobalActive()
+            guard let self else { return }
+            await self.synchronizeSelectedProjectWithGlobalActive()
+            if await self.viewModel.backendClient.hasVisibleProjects() {
+                self.shouldPresentProjectPickerOnActivate = true
+            } else {
+                self.openOnboardingWorkspaceWindow()
+            }
         }
     }
 
@@ -210,6 +221,8 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     @MainActor
     private func openWorkspaceWindow(for project: OverlayProject) {
         viewModel.selectedProject = project
+        onboardingWindowController?.window?.performClose(nil)
+        onboardingWindowController = nil
         closeWorkspaceWindows(exceptProjectID: project.id)
         if let existing = workspaceWindowControllers[project.id] {
             existing.showWindow(nil)
@@ -240,6 +253,25 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         Task { [weak self] in
             try? await self?.viewModel.backendClient.setActiveProject(projectID: project.id)
         }
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    private func openOnboardingWorkspaceWindow() {
+        if let existing = onboardingWindowController {
+            existing.showWindow(nil)
+            existing.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let controller = ProjectWorkspaceWindowController(backendURL: viewModel.backendClient.backendURL)
+        controller.onWindowClosed = { [weak self] _ in
+            self?.onboardingWindowController = nil
+        }
+        onboardingWindowController = controller
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

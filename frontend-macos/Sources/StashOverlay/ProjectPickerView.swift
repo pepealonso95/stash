@@ -52,12 +52,12 @@ final class ProjectPickerViewModel: ObservableObject {
         suggestPopoverSize()
 
         do {
-            var loaded = try await client.listProjects()
+            let loaded = try await client.visibleProjectsForPicker()
             if loaded.isEmpty {
-                let created = try await client.ensureDefaultProject()
-                loaded = [created]
+                projects = []
+            } else {
+                projects = loaded.sorted(by: sortProjects(lhs:rhs:))
             }
-            projects = loaded.sorted(by: sortProjects(lhs:rhs:))
         } catch {
             errorText = error.localizedDescription
             projects = []
@@ -135,7 +135,6 @@ final class ProjectPickerViewModel: ObservableObject {
 
     private func suggestedRootPath(for projectName: String) -> String {
         let baseDirectory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents", isDirectory: true)
             .appendingPathComponent("Stash Projects", isDirectory: true)
         let slug = projectFolderSlug(for: projectName)
         let baseCandidate = baseDirectory.appendingPathComponent(slug, isDirectory: true)

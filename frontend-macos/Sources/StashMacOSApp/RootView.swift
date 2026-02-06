@@ -32,14 +32,20 @@ public struct RootView: View {
                     .background(CodexTheme.canvas)
             } else {
                 HStack(spacing: 0) {
-                    FilesPanel(viewModel: viewModel)
-                        .frame(minWidth: 300, idealWidth: 340, maxWidth: 380)
+                    ExplorerPanel(viewModel: viewModel)
+                        .frame(minWidth: 280, idealWidth: 320, maxWidth: 380)
                         .background(CodexTheme.panel)
 
                     Divider()
 
+                    WorkspacePanel(viewModel: viewModel)
+                        .frame(minWidth: 420, idealWidth: 640, maxWidth: .infinity)
+                        .background(CodexTheme.canvas)
+
+                    Divider()
+
                     ChatPanel(viewModel: viewModel)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(minWidth: 360, idealWidth: 430, maxWidth: 520, maxHeight: .infinity)
                         .background(CodexTheme.canvas)
                 }
             }
@@ -687,66 +693,70 @@ private struct SetupRequiredCard: View {
 private struct RuntimeSetupSheet: View {
     @ObservedObject var viewModel: AppViewModel
     @Environment(\.dismiss) private var dismiss
+    @State private var showAdvanced = false
+    @State private var attemptedAutoSetup = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(viewModel.onboardingActive ? "Welcome To Stash" : "AI Runtime Setup")
+            Text(viewModel.onboardingActive ? "Quick Start" : "AI Setup")
                 .font(.system(size: 20, weight: .bold, design: .rounded))
                 .foregroundStyle(CodexTheme.textPrimary)
 
             Text(viewModel.onboardingActive
-                ? "Only blocking setup steps are shown here."
-                : "Only essential blocking setup is shown here.")
+                ? "Only two things are needed: AI ready and a project folder."
+                : "Only essential setup is shown.")
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(CodexTheme.textSecondary)
 
-            if viewModel.onboardingActive {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Required Checklist")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .foregroundStyle(CodexTheme.textSecondary)
-                    OnboardingRow(title: "Backend connected", done: viewModel.backendConnected)
-                    OnboardingRow(title: "AI runtime ready", done: viewModel.aiSetupReady)
-                    OnboardingRow(title: "Project folder selected", done: viewModel.project != nil)
-                }
-                .padding(10)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.white)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
-                )
-            }
-
             VStack(alignment: .leading, spacing: 8) {
-                Text("Planner: Codex CLI (GPT-5.3 Codex medium default)")
+                Text("Status")
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(CodexTheme.textPrimary)
 
-                Picker("Model", selection: $viewModel.setupCodexPlannerModel) {
-                    ForEach(viewModel.codexModelPresets) { preset in
-                        Text("\(preset.label) • \(preset.hint)")
-                            .tag(preset.value)
+                OnboardingRow(title: "Backend connected", done: viewModel.backendConnected)
+                OnboardingRow(title: "AI runtime ready", done: viewModel.aiSetupReady)
+                OnboardingRow(title: "Project folder selected", done: viewModel.project != nil)
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.white)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
+            )
+
+            DisclosureGroup(isExpanded: $showAdvanced) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Codex model")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(CodexTheme.textPrimary)
+
+                    Picker("Model", selection: $viewModel.setupCodexPlannerModel) {
+                        ForEach(viewModel.codexModelPresets) { preset in
+                            Text("\(preset.label) • \(preset.hint)")
+                                .tag(preset.value)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    if let resolved = viewModel.setupStatus?.codexBinResolved, !resolved.isEmpty {
+                        Text("Codex binary: \(resolved)")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(CodexTheme.textSecondary)
+                    }
+
+                    if viewModel.setupStatus?.needsOpenaiKey == true {
+                        SecureField("OpenAI API key (only if Codex is unavailable)", text: $viewModel.setupOpenAIAPIKey)
+                            .textFieldStyle(.roundedBorder)
                     }
                 }
-                .pickerStyle(.menu)
-
-                Text("Choose a faster model for lower latency, or keep Default for best compatibility.")
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                .padding(.top, 8)
+            } label: {
+                Text("Advanced settings")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(CodexTheme.textSecondary)
-
-                if let resolved = viewModel.setupStatus?.codexBinResolved, !resolved.isEmpty {
-                    Text("Codex binary: \(resolved)")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(CodexTheme.textSecondary)
-                }
-
-                if viewModel.setupStatus?.needsOpenaiKey == true {
-                    SecureField("OpenAI API key (only required if Codex is unavailable)", text: $viewModel.setupOpenAIAPIKey)
-                        .textFieldStyle(.roundedBorder)
-                }
             }
             .padding(10)
             .background(
@@ -796,7 +806,7 @@ private struct RuntimeSetupSheet: View {
                 .buttonStyle(.bordered)
 
                 if viewModel.onboardingActive {
-                    Button("Choose Project Folder") {
+                    Button("Choose Folder") {
                         viewModel.presentProjectPicker()
                     }
                     .buttonStyle(.bordered)
@@ -809,7 +819,7 @@ private struct RuntimeSetupSheet: View {
 
                 Spacer()
 
-                Button(viewModel.setupStatus?.needsOpenaiKey == true ? "Save API Key" : "Apply Defaults") {
+                Button("Fix Automatically") {
                     Task {
                         await viewModel.saveRuntimeSetup()
                         if !viewModel.onboardingActive, viewModel.aiSetupReady {
@@ -821,7 +831,7 @@ private struct RuntimeSetupSheet: View {
                 .disabled(viewModel.setupSaving)
 
                 if viewModel.onboardingActive {
-                    Button("Finish Onboarding") {
+                    Button("Continue") {
                         viewModel.finishOnboarding()
                         if !viewModel.onboardingActive {
                             dismiss()
@@ -833,9 +843,13 @@ private struct RuntimeSetupSheet: View {
             }
         }
         .padding(16)
-        .frame(minWidth: 620, minHeight: 560)
+        .frame(minWidth: 540, minHeight: 460)
         .task {
             await viewModel.refreshRuntimeSetup()
+            if viewModel.onboardingActive, !viewModel.aiSetupReady, !attemptedAutoSetup {
+                attemptedAutoSetup = true
+                await viewModel.saveRuntimeSetup()
+            }
         }
     }
 }

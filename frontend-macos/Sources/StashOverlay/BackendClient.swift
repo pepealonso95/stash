@@ -4,6 +4,7 @@ enum OverlayBackendError: LocalizedError {
     case invalidURL
     case invalidResponse
     case httpError(code: Int, message: String)
+    case noProjectSelected
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +14,8 @@ enum OverlayBackendError: LocalizedError {
             return "Invalid response from backend."
         case let .httpError(code, message):
             return "Backend error \(code): \(message)"
+        case .noProjectSelected:
+            return "No project selected yet."
         }
     }
 }
@@ -189,25 +192,29 @@ final class BackendClient {
 
     func ensureProjectSelection(preferredProjectID: String?) async throws -> OverlayProject {
         let projects = try await listProjects()
+        let preferredPool = nonLegacyPreferredProjects(from: projects)
+        let selectionPool = preferredPool.isEmpty ? projects : preferredPool
         if let preferredProjectID,
-           let preferred = projects.first(where: { $0.id == preferredProjectID })
+           let preferred = selectionPool.first(where: { $0.id == preferredProjectID })
         {
             return preferred
         }
 
-        if let latest = projects.max(by: { ($0.lastOpenedAt ?? "") < ($1.lastOpenedAt ?? "") }) {
+        if let latest = selectionPool.max(by: { ($0.lastOpenedAt ?? "") < ($1.lastOpenedAt ?? "") }) {
             return latest
         }
 
-        return try await ensureDefaultProject()
+        throw OverlayBackendError.noProjectSelected
     }
 
     func ensureMostRecentlyOpenedProject() async throws -> OverlayProject {
         let projects = try await listProjects()
-        if let latest = projects.max(by: { ($0.lastOpenedAt ?? "") < ($1.lastOpenedAt ?? "") }) {
+        let preferredPool = nonLegacyPreferredProjects(from: projects)
+        let selectionPool = preferredPool.isEmpty ? projects : preferredPool
+        if let latest = selectionPool.max(by: { ($0.lastOpenedAt ?? "") < ($1.lastOpenedAt ?? "") }) {
             return latest
         }
-        return try await ensureDefaultProject()
+        throw OverlayBackendError.noProjectSelected
     }
 
     func resolveDropTargetProject(preferredProjectID: String?) async throws -> OverlayProject {
@@ -222,6 +229,24 @@ final class BackendClient {
             return preferred
         }
         return try await ensureMostRecentlyOpenedProject()
+    }
+
+    func visibleProjectsForPicker() async throws -> [OverlayProject] {
+        try await listProjects()
+    }
+
+    func hasVisibleProjects() async -> Bool {
+        (try? await visibleProjectsForPicker().isEmpty == false) ?? false
+    }
+
+    private func nonLegacyPreferredProjects(from projects: [OverlayProject]) -> [OverlayProject] {
+        projects.filter { !isLegacyDefaultProject($0) }
+    }
+
+    private func isLegacyDefaultProject(_ project: OverlayProject) -> Bool {
+        let root = project.rootPath.lowercased()
+        let name = project.name.lowercased()
+        return root.hasSuffix("/stashdefaultproject") || name == "default project"
     }
 
     func registerAssets(urls: [URL], preferredProjectID: String?) async throws -> OverlayProject {

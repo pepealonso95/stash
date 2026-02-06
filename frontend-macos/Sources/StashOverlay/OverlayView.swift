@@ -38,7 +38,7 @@ final class OverlayViewModel: ObservableObject {
     }
 
     init() {
-        accessibilityTrusted = documentDetector.requestAccessibilityTrust(prompt: false)
+        accessibilityTrusted = documentDetector.accessibilityTrustStatus()
 
         documentDetector.onDetectedDocumentChange = { [weak self] detectedDocument in
             guard let self else { return }
@@ -52,7 +52,8 @@ final class OverlayViewModel: ObservableObject {
             self.stateDidChange?()
         }
 
-        documentDetector.start()
+        // Start detector only after explicit user interaction to avoid
+        // proactive filesystem permission prompts on app launch.
     }
 
     deinit {
@@ -61,7 +62,11 @@ final class OverlayViewModel: ObservableObject {
 
     @discardableResult
     func requestAccessibilityTrust(prompt: Bool) -> Bool {
-        documentDetector.requestAccessibilityTrust(prompt: prompt)
+        let trusted = documentDetector.requestAccessibilityTrust(prompt: prompt)
+        if trusted {
+            documentDetector.start()
+        }
+        return trusted
     }
 
     func handleOverlayTap() {

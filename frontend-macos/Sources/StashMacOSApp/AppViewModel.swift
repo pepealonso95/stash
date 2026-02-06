@@ -4,6 +4,25 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class AppViewModel: ObservableObject {
+    struct FolderBreadcrumb: Identifiable, Hashable {
+        let id: String
+        let title: String
+        let relativePath: String
+    }
+
+    struct WorkspaceSessionState: Codable {
+        struct TabState: Codable {
+            let relativePath: String
+            let isPreview: Bool
+            let isPinned: Bool
+        }
+
+        let explorerMode: ExplorerMode
+        let folderViewPath: String
+        let tabs: [TabState]
+        let activeTabPath: String?
+    }
+
     struct CodexModelPreset: Identifiable, Hashable {
         let value: String
         let label: String
@@ -26,6 +45,11 @@ final class AppViewModel: ObservableObject {
     @Published var files: [FileItem] = []
     @Published var collapsedDirectoryPaths: Set<String> = []
     @Published var fileQuery = ""
+    @Published var explorerMode: ExplorerMode = .folders
+    @Published var folderViewPath = ""
+    @Published var workspaceTabs: [WorkspaceTab] = []
+    @Published var activeTabID: String?
+    @Published var documentBuffers: [String: DocumentBuffer] = [:]
 
     @Published var composerText = ""
     @Published var isSending = false
@@ -76,15 +100,19 @@ final class AppViewModel: ObservableObject {
         formatter.dateFormat = "HH:mm:ss"
         return formatter
     }()
+    private let autosaveDebounceNanoseconds: UInt64 = 700_000_000
     private let defaults = UserDefaults.standard
     private let lastProjectPathKey = "stash.lastProjectPath"
     private let lastProjectBookmarkKey = "stash.lastProjectFolderBookmark"
     private let onboardingCompletedKey = "stash.onboardingCompletedV1"
+    private let workspaceSessionPrefix = "stash.workspace.session."
     private let recommendedCodexModel = "gpt-5.3-codex"
     private let initialProjectRootURL: URL?
     private var activeSecurityScopedProjectURL: URL?
     private var activeRunID: String?
     private var lastRunEventID = 0
+    private var autosaveTasksByPath: [String: Task<Void, Never>] = [:]
+    private var isRestoringWorkspaceSession = false
     private var client: BackendClient
     private let baseCodexModelPresets: [CodexModelPreset] = [
         CodexModelPreset(value: "gpt-5.3-codex", label: "GPT-5.3 Codex (medium)", hint: "Recommended default"),
@@ -108,6 +136,9 @@ final class AppViewModel: ObservableObject {
         runEventStreamTask?.cancel()
         filePollTask?.cancel()
         indexStatusClearTask?.cancel()
+        for task in autosaveTasksByPath.values {
+            task.cancel()
+        }
         if let activeSecurityScopedProjectURL {
             activeSecurityScopedProjectURL.stopAccessingSecurityScopedResource()
         }
@@ -141,6 +172,50 @@ final class AppViewModel: ObservableObject {
             }
         }
         return files.filter { !hasCollapsedAncestor($0) }
+    }
+
+    var currentFolderItems: [FileItem] {
+        let trimmed = fileQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseItems = files.filter { $0.parentRelativePath == folderViewPath }
+        let visible = trimmed.isEmpty ? baseItems : baseItems.filter {
+            $0.relativePath.localizedCaseInsensitiveContains(trimmed) || $0.name.localizedCaseInsensitiveContains(trimmed)
+        }
+        return visible.sorted { lhs, rhs in
+            if lhs.isDirectory != rhs.isDirectory {
+                return lhs.isDirectory && !rhs.isDirectory
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    var folderBreadcrumbs: [FolderBreadcrumb] {
+        if folderViewPath.isEmpty {
+            return [FolderBreadcrumb(id: "__root__", title: "Root", relativePath: "")]
+        }
+
+        var crumbs: [FolderBreadcrumb] = [FolderBreadcrumb(id: "__root__", title: "Root", relativePath: "")]
+        var running = ""
+        for component in folderViewPath.split(separator: "/").map(String.init) {
+            running = running.isEmpty ? component : "\(running)/\(component)"
+            crumbs.append(FolderBreadcrumb(id: running, title: component, relativePath: running))
+        }
+        return crumbs
+    }
+
+    var activeTab: WorkspaceTab? {
+        guard let activeTabID else { return nil }
+        return workspaceTabs.first { $0.id == activeTabID }
+    }
+
+    var activeDocumentBuffer: DocumentBuffer? {
+        guard let path = activeTab?.relativePath else { return nil }
+        return documentBuffers[path]
+    }
+
+    var projectDirectories: [FileItem] {
+        files
+            .filter(\.isDirectory)
+            .sorted { $0.relativePath.localizedCaseInsensitiveCompare($1.relativePath) == .orderedAscending }
     }
 
     var visibleMessages: [Message] {
@@ -189,6 +264,587 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func setExplorerMode(_ mode: ExplorerMode) {
+        guard explorerMode != mode else { return }
+        explorerMode = mode
+        persistTabsForProject()
+    }
+
+    func navigateFolder(to relativePath: String) {
+        let normalized = normalizedDropDirectory(relativePath)
+        if normalized.isEmpty {
+            folderViewPath = ""
+            persistTabsForProject()
+            return
+        }
+
+        guard files.contains(where: { $0.isDirectory && $0.relativePath == normalized }) else {
+            return
+        }
+        folderViewPath = normalized
+        persistTabsForProject()
+    }
+
+    func openFile(_ item: FileItem, mode: FileOpenMode = .preview) {
+        guard !item.isDirectory else {
+            navigateFolder(to: item.relativePath)
+            return
+        }
+        openFile(relativePath: item.relativePath, mode: mode)
+    }
+
+    func openFile(relativePath: String, mode: FileOpenMode = .preview) {
+        guard let projectRootURL else {
+            errorText = "Open a project folder first."
+            return
+        }
+
+        guard let fileItem = files.first(where: { !$0.isDirectory && $0.relativePath == relativePath }) else {
+            errorText = "File no longer exists: \(relativePath)"
+            return
+        }
+        let itemURL = projectRootURL.appendingPathComponent(relativePath).standardizedFileURL
+
+        guard FileManager.default.fileExists(atPath: itemURL.path) else {
+            errorText = "File no longer exists: \(relativePath)"
+            return
+        }
+
+        let existingIndex = workspaceTabs.firstIndex(where: { $0.relativePath == relativePath })
+        if let existingIndex {
+            if mode == .pinned {
+                workspaceTabs[existingIndex].isPinned = true
+                workspaceTabs[existingIndex].isPreview = false
+            }
+            activateTab(workspaceTabs[existingIndex].id)
+            return
+        }
+
+        let fileKind = detectFileKind(for: fileItem, url: itemURL)
+        let newTab: WorkspaceTab
+        if mode == .preview,
+           let previewIndex = workspaceTabs.firstIndex(where: { $0.isPreview && !$0.isPinned })
+        {
+            let previewID = workspaceTabs[previewIndex].id
+            saveBuffer(relativePath: workspaceTabs[previewIndex].relativePath)
+            workspaceTabs.remove(at: previewIndex)
+            newTab = WorkspaceTab(
+                id: previewID,
+                relativePath: relativePath,
+                title: fileItem.name,
+                fileKind: fileKind,
+                isPreview: true,
+                isPinned: false
+            )
+        } else {
+            newTab = WorkspaceTab.make(
+                relativePath: relativePath,
+                fileKind: fileKind,
+                isPreview: mode == .preview,
+                isPinned: mode == .pinned
+            )
+        }
+
+        workspaceTabs.append(newTab)
+        activeTabID = newTab.id
+        ensureDocumentBufferLoaded(relativePath: relativePath, fileKind: fileKind, itemURL: itemURL, item: fileItem)
+        persistTabsForProject()
+    }
+
+    func activateTab(_ tabID: String) {
+        guard activeTabID != tabID else { return }
+        if let current = activeTab {
+            saveBuffer(relativePath: current.relativePath)
+        }
+        activeTabID = tabID
+        persistTabsForProject()
+    }
+
+    func closeTab(_ tabID: String) {
+        guard let index = workspaceTabs.firstIndex(where: { $0.id == tabID }) else { return }
+        let closing = workspaceTabs[index]
+        saveBuffer(relativePath: closing.relativePath)
+        workspaceTabs.remove(at: index)
+
+        if activeTabID == tabID {
+            if workspaceTabs.indices.contains(index) {
+                activeTabID = workspaceTabs[index].id
+            } else {
+                activeTabID = workspaceTabs.last?.id
+            }
+        }
+        if !workspaceTabs.contains(where: { $0.relativePath == closing.relativePath }) {
+            documentBuffers.removeValue(forKey: closing.relativePath)
+            autosaveTasksByPath[closing.relativePath]?.cancel()
+            autosaveTasksByPath[closing.relativePath] = nil
+        }
+        persistTabsForProject()
+    }
+
+    func closeActiveTab() {
+        guard let activeTabID else { return }
+        closeTab(activeTabID)
+    }
+
+    func markActiveTabPinned() {
+        guard let activeTabID,
+              let index = workspaceTabs.firstIndex(where: { $0.id == activeTabID })
+        else {
+            return
+        }
+        workspaceTabs[index].isPinned = true
+        workspaceTabs[index].isPreview = false
+        persistTabsForProject()
+    }
+
+    func updateActiveDocumentContent(_ content: String) {
+        guard let path = activeTab?.relativePath else { return }
+        updateDocumentContent(relativePath: path, content: content)
+    }
+
+    func updateCSVCell(relativePath: String, row: Int, column: Int, value: String) {
+        guard var buffer = documentBuffers[relativePath] else { return }
+        var rows = CSVCodec.parse(buffer.content)
+        guard row >= 0, column >= 0 else { return }
+
+        while rows.count <= row {
+            rows.append([])
+        }
+        while rows[row].count <= column {
+            rows[row].append("")
+        }
+        rows[row][column] = value
+        buffer.content = CSVCodec.encode(rows)
+        buffer.isDirty = buffer.content != buffer.lastSavedContent
+        documentBuffers[relativePath] = buffer
+        scheduleAutosave(relativePath: relativePath)
+    }
+
+    func saveBuffer(relativePath: String) {
+        guard let projectRootURL else { return }
+        guard var buffer = documentBuffers[relativePath], buffer.isDirty else { return }
+        guard buffer.fileKind.isEditable else { return }
+
+        let url = projectRootURL.appendingPathComponent(relativePath).standardizedFileURL
+        do {
+            try buffer.content.write(to: url, atomically: true, encoding: .utf8)
+            buffer.lastSavedContent = buffer.content
+            buffer.isDirty = false
+            buffer.modifiedAt = Date()
+            documentBuffers[relativePath] = buffer
+            autosaveTasksByPath[relativePath]?.cancel()
+            autosaveTasksByPath[relativePath] = nil
+
+            Task {
+                await refreshFiles(force: true, triggerChangeIndex: false)
+                await autoIndexCurrentProject(fullScan: false, statusText: "Files changed. Re-indexing...")
+            }
+        } catch {
+            errorText = "Could not save file: \(relativePath) (\(error.localizedDescription))"
+        }
+    }
+
+    func createFolder(name: String, inRelativeDirectory relativeDirectory: String?) {
+        guard let projectRootURL else {
+            errorText = "Open a project folder first."
+            return
+        }
+
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, !cleanName.contains("/") else {
+            errorText = "Folder name is invalid."
+            return
+        }
+
+        let base = normalizedDropDirectory(relativeDirectory)
+        let baseURL = base.isEmpty ? projectRootURL : projectRootURL.appendingPathComponent(base, isDirectory: true)
+        let target = baseURL.appendingPathComponent(cleanName, isDirectory: true).standardizedFileURL
+        guard isInsideProject(target, root: projectRootURL.standardizedFileURL) else {
+            errorText = "Blocked folder creation outside project."
+            return
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+            Task {
+                await refreshFiles(force: true, triggerChangeIndex: false)
+                await autoIndexCurrentProject(fullScan: false, statusText: "Files changed. Re-indexing...")
+            }
+        } catch {
+            errorText = "Could not create folder: \(error.localizedDescription)"
+        }
+    }
+
+    func renameItem(_ item: FileItem, to newName: String) {
+        guard let projectRootURL else {
+            errorText = "Open a project folder first."
+            return
+        }
+        let cleanName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, !cleanName.contains("/") else {
+            errorText = "Name is invalid."
+            return
+        }
+        guard cleanName != item.name else { return }
+
+        let source = projectRootURL.appendingPathComponent(item.relativePath).standardizedFileURL
+        let destination = source.deletingLastPathComponent().appendingPathComponent(cleanName, isDirectory: item.isDirectory).standardizedFileURL
+        guard isInsideProject(destination, root: projectRootURL.standardizedFileURL) else {
+            errorText = "Blocked rename outside project."
+            return
+        }
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            errorText = "An item with that name already exists."
+            return
+        }
+        do {
+            try FileManager.default.moveItem(at: source, to: destination)
+            let oldRelative = item.relativePath
+            let newRelative = oldRelative.split(separator: "/").dropLast().joined(separator: "/")
+            let resolvedRelative = normalizedDropDirectory(newRelative.isEmpty ? cleanName : "\(newRelative)/\(cleanName)")
+            rebaseWorkspacePaths(fromRelativePath: oldRelative, toRelativePath: resolvedRelative, sourceWasDirectory: item.isDirectory)
+            Task {
+                await refreshFiles(force: true, triggerChangeIndex: false)
+                await autoIndexCurrentProject(fullScan: false, statusText: "Files changed. Re-indexing...")
+            }
+        } catch {
+            errorText = "Could not rename item: \(error.localizedDescription)"
+        }
+    }
+
+    func moveItem(_ item: FileItem, toRelativeDirectory targetRelativeDirectory: String) {
+        guard let projectRootURL else {
+            errorText = "Open a project folder first."
+            return
+        }
+
+        let root = projectRootURL.standardizedFileURL
+        let source = root.appendingPathComponent(item.relativePath).standardizedFileURL
+        let targetDirNormalized = normalizedDropDirectory(targetRelativeDirectory)
+        let destinationDir = targetDirNormalized.isEmpty ? root : root.appendingPathComponent(targetDirNormalized, isDirectory: true).standardizedFileURL
+        let desired = destinationDir.appendingPathComponent(item.name, isDirectory: item.isDirectory).standardizedFileURL
+        let destination = uniqueDestinationURL(for: desired)
+
+        guard isInsideProject(destination, root: root) else {
+            errorText = "Blocked moving item outside project."
+            return
+        }
+        if isDescendant(destination, of: source), item.isDirectory {
+            errorText = "Cannot move a folder into itself."
+            return
+        }
+        do {
+            try FileManager.default.moveItem(at: source, to: destination)
+            let newRelative = destination.path.replacingOccurrences(of: root.path + "/", with: "")
+            rebaseWorkspacePaths(fromRelativePath: item.relativePath, toRelativePath: newRelative, sourceWasDirectory: item.isDirectory)
+            Task {
+                await refreshFiles(force: true, triggerChangeIndex: false)
+                await autoIndexCurrentProject(fullScan: false, statusText: "Files changed. Re-indexing...")
+            }
+        } catch {
+            errorText = "Could not move item: \(error.localizedDescription)"
+        }
+    }
+
+    func copyItem(_ item: FileItem, toRelativeDirectory targetRelativeDirectory: String) {
+        guard let projectRootURL else {
+            errorText = "Open a project folder first."
+            return
+        }
+        let root = projectRootURL.standardizedFileURL
+        let source = root.appendingPathComponent(item.relativePath).standardizedFileURL
+        let targetDirNormalized = normalizedDropDirectory(targetRelativeDirectory)
+        let destinationDir = targetDirNormalized.isEmpty ? root : root.appendingPathComponent(targetDirNormalized, isDirectory: true).standardizedFileURL
+        let desired = destinationDir.appendingPathComponent(item.name, isDirectory: item.isDirectory).standardizedFileURL
+        let destination = uniqueDestinationURL(for: desired)
+
+        guard isInsideProject(destination, root: root) else {
+            errorText = "Blocked copy outside project."
+            return
+        }
+        if isDescendant(destination, of: source), item.isDirectory {
+            errorText = "Cannot copy a folder into itself."
+            return
+        }
+        do {
+            try FileManager.default.copyItem(at: source, to: destination)
+            Task {
+                await refreshFiles(force: true, triggerChangeIndex: false)
+                await autoIndexCurrentProject(fullScan: false, statusText: "Files changed. Re-indexing...")
+            }
+        } catch {
+            errorText = "Could not copy item: \(error.localizedDescription)"
+        }
+    }
+
+    func trashItem(_ item: FileItem) {
+        guard let projectRootURL else {
+            errorText = "Open a project folder first."
+            return
+        }
+        let root = projectRootURL.standardizedFileURL
+        let source = root.appendingPathComponent(item.relativePath).standardizedFileURL
+        do {
+            _ = try FileManager.default.trashItem(at: source, resultingItemURL: nil)
+            closeWorkspacePaths(fromRelativePath: item.relativePath, sourceWasDirectory: item.isDirectory)
+            Task {
+                await refreshFiles(force: true, triggerChangeIndex: false)
+                await autoIndexCurrentProject(fullScan: false, statusText: "Files changed. Re-indexing...")
+            }
+        } catch {
+            errorText = "Could not move item to Trash: \(error.localizedDescription)"
+        }
+    }
+
+    func revealItemInFinder(_ item: FileItem) {
+        guard let root = projectRootURL else { return }
+        let url = root.appendingPathComponent(item.relativePath).standardizedFileURL
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    func restoreTabsForProject() {
+        guard let projectID = project?.id else { return }
+        let key = workspaceSessionPrefix + projectID
+        guard let data = defaults.data(forKey: key) else { return }
+        guard let session = try? JSONDecoder().decode(WorkspaceSessionState.self, from: data) else { return }
+
+        isRestoringWorkspaceSession = true
+        defer {
+            isRestoringWorkspaceSession = false
+            persistTabsForProject()
+        }
+
+        workspaceTabs = []
+        activeTabID = nil
+        documentBuffers = [:]
+
+        explorerMode = session.explorerMode
+        let normalizedFolder = normalizedDropDirectory(session.folderViewPath)
+        if normalizedFolder.isEmpty || files.contains(where: { $0.isDirectory && $0.relativePath == normalizedFolder }) {
+            folderViewPath = normalizedFolder
+        } else {
+            folderViewPath = ""
+        }
+
+        for tabState in session.tabs {
+            guard files.contains(where: { !$0.isDirectory && $0.relativePath == tabState.relativePath }) else {
+                continue
+            }
+            if tabState.isPinned {
+                openFile(relativePath: tabState.relativePath, mode: .pinned)
+            } else {
+                openFile(relativePath: tabState.relativePath, mode: .preview)
+            }
+        }
+
+        if let activePath = session.activeTabPath,
+           let active = workspaceTabs.first(where: { $0.relativePath == activePath })
+        {
+            activeTabID = active.id
+        } else {
+            activeTabID = workspaceTabs.last?.id
+        }
+    }
+
+    func persistTabsForProject() {
+        guard !isRestoringWorkspaceSession else { return }
+        guard let projectID = project?.id else { return }
+        let session = WorkspaceSessionState(
+            explorerMode: explorerMode,
+            folderViewPath: folderViewPath,
+            tabs: workspaceTabs.map {
+                WorkspaceSessionState.TabState(
+                    relativePath: $0.relativePath,
+                    isPreview: $0.isPreview,
+                    isPinned: $0.isPinned
+                )
+            },
+            activeTabPath: activeTab?.relativePath
+        )
+        let key = workspaceSessionPrefix + projectID
+        if let encoded = try? JSONEncoder().encode(session) {
+            defaults.set(encoded, forKey: key)
+        }
+    }
+
+    private func resetWorkspaceForProjectSwitch() {
+        for task in autosaveTasksByPath.values {
+            task.cancel()
+        }
+        autosaveTasksByPath = [:]
+        workspaceTabs = []
+        activeTabID = nil
+        documentBuffers = [:]
+        folderViewPath = ""
+    }
+
+    private func ensureDocumentBufferLoaded(relativePath: String, fileKind: FileKind, itemURL: URL, item: FileItem) {
+        if documentBuffers[relativePath] != nil {
+            return
+        }
+
+        let data = (try? Data(contentsOf: itemURL)) ?? Data()
+        let isBinary = isLikelyBinary(data: data)
+        let content = isBinary ? "" : String(decoding: data, as: UTF8.self)
+        documentBuffers[relativePath] = DocumentBuffer(
+            relativePath: relativePath,
+            fileKind: fileKind,
+            content: content,
+            lastSavedContent: content,
+            isDirty: false,
+            isBinary: isBinary,
+            fileSizeBytes: item.fileSizeBytes,
+            modifiedAt: item.modifiedAt
+        )
+    }
+
+    func updateDocumentContent(relativePath: String, content: String) {
+        guard var buffer = documentBuffers[relativePath] else { return }
+        buffer.content = content
+        buffer.isDirty = buffer.content != buffer.lastSavedContent
+        documentBuffers[relativePath] = buffer
+        scheduleAutosave(relativePath: relativePath)
+    }
+
+    private func scheduleAutosave(relativePath: String) {
+        autosaveTasksByPath[relativePath]?.cancel()
+        autosaveTasksByPath[relativePath] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: self?.autosaveDebounceNanoseconds ?? 700_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.saveBuffer(relativePath: relativePath)
+            }
+        }
+    }
+
+    private func detectFileKind(for item: FileItem, url: URL) -> FileKind {
+        if item.isDirectory {
+            return .unknown
+        }
+        let ext = item.pathExtension.lowercased()
+        let loaded = try? Data(contentsOf: url, options: .mappedIfSafe)
+        let probe = loaded.map { Data($0.prefix(4096)) } ?? Data()
+        let binary = isLikelyBinary(data: probe)
+        return FileKindDetector.detect(pathExtension: ext, isBinary: binary)
+    }
+
+    private func isLikelyBinary(data: Data) -> Bool {
+        if data.isEmpty {
+            return false
+        }
+        if data.contains(0) {
+            return true
+        }
+        let nonPrintable = data.filter { byte in
+            byte < 9 || (byte > 13 && byte < 32)
+        }
+        return Double(nonPrintable.count) / Double(data.count) > 0.2
+    }
+
+    private func rebaseWorkspacePaths(fromRelativePath oldPath: String, toRelativePath newPath: String, sourceWasDirectory: Bool) {
+        let normalizedOld = normalizedDropDirectory(oldPath)
+        let normalizedNew = normalizedDropDirectory(newPath)
+        guard !normalizedOld.isEmpty else { return }
+
+        var remap: [String: String] = [:]
+        for tab in workspaceTabs {
+            if sourceWasDirectory {
+                if tab.relativePath == normalizedOld {
+                    remap[tab.relativePath] = normalizedNew
+                } else if tab.relativePath.hasPrefix(normalizedOld + "/") {
+                    let suffix = String(tab.relativePath.dropFirst(normalizedOld.count + 1))
+                    remap[tab.relativePath] = normalizedNew.isEmpty ? suffix : "\(normalizedNew)/\(suffix)"
+                }
+            } else if tab.relativePath == normalizedOld {
+                remap[tab.relativePath] = normalizedNew
+            }
+        }
+
+        guard !remap.isEmpty else { return }
+        for index in workspaceTabs.indices {
+            let path = workspaceTabs[index].relativePath
+            guard let mapped = remap[path] else { continue }
+            workspaceTabs[index] = WorkspaceTab(
+                id: workspaceTabs[index].id,
+                relativePath: mapped,
+                title: URL(fileURLWithPath: mapped).lastPathComponent,
+                fileKind: workspaceTabs[index].fileKind,
+                isPreview: workspaceTabs[index].isPreview,
+                isPinned: workspaceTabs[index].isPinned
+            )
+        }
+
+        for (oldBufferPath, newBufferPath) in remap {
+            if let buffer = documentBuffers.removeValue(forKey: oldBufferPath) {
+                documentBuffers[newBufferPath] = DocumentBuffer(
+                    relativePath: newBufferPath,
+                    fileKind: buffer.fileKind,
+                    content: buffer.content,
+                    lastSavedContent: buffer.lastSavedContent,
+                    isDirty: buffer.isDirty,
+                    isBinary: buffer.isBinary,
+                    fileSizeBytes: buffer.fileSizeBytes,
+                    modifiedAt: buffer.modifiedAt
+                )
+            }
+            if let task = autosaveTasksByPath.removeValue(forKey: oldBufferPath) {
+                task.cancel()
+            }
+        }
+        persistTabsForProject()
+    }
+
+    private func closeWorkspacePaths(fromRelativePath rootPath: String, sourceWasDirectory: Bool) {
+        let normalizedRoot = normalizedDropDirectory(rootPath)
+        guard !normalizedRoot.isEmpty else { return }
+
+        let removedPaths = Set(workspaceTabs.compactMap { tab in
+            if sourceWasDirectory {
+                if tab.relativePath == normalizedRoot || tab.relativePath.hasPrefix(normalizedRoot + "/") {
+                    return tab.relativePath
+                }
+                return nil
+            }
+            return tab.relativePath == normalizedRoot ? tab.relativePath : nil
+        })
+
+        guard !removedPaths.isEmpty else { return }
+        workspaceTabs.removeAll { removedPaths.contains($0.relativePath) }
+        if let activeTabID, !workspaceTabs.contains(where: { $0.id == activeTabID }) {
+            self.activeTabID = workspaceTabs.last?.id
+        }
+        for path in removedPaths {
+            documentBuffers.removeValue(forKey: path)
+            autosaveTasksByPath[path]?.cancel()
+            autosaveTasksByPath[path] = nil
+        }
+        persistTabsForProject()
+    }
+
+    private func reconcileWorkspaceAfterFileRefresh(scanned: [FileItem]) {
+        let validFilePaths = Set(scanned.filter { !$0.isDirectory }.map(\.relativePath))
+        let validDirPaths = Set(scanned.filter(\.isDirectory).map(\.relativePath))
+
+        let stalePaths = Set(workspaceTabs.map(\.relativePath)).subtracting(validFilePaths)
+        if !stalePaths.isEmpty {
+            workspaceTabs.removeAll { stalePaths.contains($0.relativePath) }
+            for stale in stalePaths {
+                documentBuffers.removeValue(forKey: stale)
+                autosaveTasksByPath[stale]?.cancel()
+                autosaveTasksByPath[stale] = nil
+            }
+            if let activeTabID, !workspaceTabs.contains(where: { $0.id == activeTabID }) {
+                self.activeTabID = workspaceTabs.last?.id
+            }
+            persistTabsForProject()
+        }
+
+        if !folderViewPath.isEmpty, !validDirPaths.contains(folderViewPath) {
+            folderViewPath = ""
+            persistTabsForProject()
+        }
+    }
+
     func bootstrap() async {
         guard !didBootstrap else { return }
         didBootstrap = true
@@ -204,6 +860,10 @@ final class AppViewModel: ObservableObject {
             setupSheetPresented = true
             if setupStatusText == nil {
                 setupStatusText = "Welcome to Stash. Complete the first-run setup checklist."
+            }
+            if initialProjectRootURL == nil {
+                // First run should stay in onboarding and avoid triggering folder access prompts.
+                return
             }
         }
 
@@ -399,10 +1059,12 @@ final class AppViewModel: ObservableObject {
             stopRunEventStream()
             activeRunID = nil
             resetRunFeedback(clearEvents: true)
+            resetWorkspaceForProjectSwitch()
             rememberProjectSelection(url: prepared.url, bookmarkData: prepared.bookmarkData)
             activatePreparedAccess(prepared)
 
             await refreshFiles(force: true, triggerChangeIndex: false)
+            restoreTabsForProject()
             refreshMentionState()
             startFilePolling()
             await refreshConversations()
@@ -449,6 +1111,25 @@ final class AppViewModel: ObservableObject {
 
         if !NSWorkspace.shared.open(itemURL) {
             errorText = "Could not open in macOS: \(item.relativePath)"
+        }
+    }
+
+    func openRelativePathInOS(_ relativePath: String) {
+        if let item = files.first(where: { $0.relativePath == relativePath }) {
+            openFileItemInOS(item)
+            return
+        }
+        guard let projectRootURL else {
+            errorText = "Open a project folder first."
+            return
+        }
+        let target = projectRootURL.appendingPathComponent(relativePath).standardizedFileURL
+        guard FileManager.default.fileExists(atPath: target.path) else {
+            errorText = "File no longer exists: \(relativePath)"
+            return
+        }
+        if !NSWorkspace.shared.open(target) {
+            errorText = "Could not open in macOS: \(relativePath)"
         }
     }
 
@@ -606,12 +1287,20 @@ final class AppViewModel: ObservableObject {
         }
 
         var importedCount = 0
+        var movedCount = 0
+        var copiedCount = 0
         var failures: [String] = []
 
         for source in droppedURLs {
             do {
-                _ = try transferDroppedItem(from: source, to: destinationBase, projectRoot: root)
+                let op = try transferDroppedItem(from: source, to: destinationBase, projectRoot: root)
                 importedCount += 1
+                switch op {
+                case .copied:
+                    copiedCount += 1
+                case .moved:
+                    movedCount += 1
+                }
             } catch {
                 failures.append("\(source.lastPathComponent): \(error.localizedDescription)")
             }
@@ -626,11 +1315,18 @@ final class AppViewModel: ObservableObject {
             return
         }
 
-        runStatusText = "Imported \(importedCount) item(s)"
+        if movedCount > 0, copiedCount > 0 {
+            runStatusText = "Moved \(movedCount), copied \(copiedCount)"
+        } else if movedCount > 0 {
+            runStatusText = "Moved \(movedCount) item(s)"
+        } else {
+            runStatusText = "Copied \(importedCount) item(s)"
+        }
     }
 
     private enum DropTransferOp {
         case copied
+        case moved
     }
 
     private func transferDroppedItem(from sourceURL: URL, to destinationBase: URL, projectRoot: URL) throws -> DropTransferOp {
@@ -666,7 +1362,12 @@ final class AppViewModel: ObservableObject {
             )
         }
 
-        // Deep copy semantics: keep source untouched for both files and directories.
+        if isInsideProject(source, root: projectRoot), !NSEvent.modifierFlags.contains(.option) {
+            try fm.moveItem(at: source, to: destination)
+            return .moved
+        }
+
+        // Deep copy semantics for external drops and option-drag.
         try fm.copyItem(at: source, to: destination)
         return .copied
     }
@@ -851,6 +1552,9 @@ final class AppViewModel: ObservableObject {
         guard let projectRootURL else {
             files = []
             lastFileSignature = nil
+            workspaceTabs = []
+            documentBuffers = [:]
+            activeTabID = nil
             return
         }
 
@@ -867,6 +1571,7 @@ final class AppViewModel: ObservableObject {
         let directoryPaths = Set(scanned.filter(\.isDirectory).map(\.relativePath))
         collapsedDirectoryPaths = collapsedDirectoryPaths.intersection(directoryPaths)
         lastFileSignature = signature
+        reconcileWorkspaceAfterFileRefresh(scanned: scanned)
         refreshMentionState()
 
         guard triggerChangeIndex, hadPreviousSnapshot else { return }

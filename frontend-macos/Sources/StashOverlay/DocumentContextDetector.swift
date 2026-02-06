@@ -72,6 +72,10 @@ final class DocumentContextDetector {
         refreshTimer = nil
     }
 
+    func accessibilityTrustStatus() -> Bool {
+        AXIsProcessTrusted()
+    }
+
     @discardableResult
     func requestAccessibilityTrust(prompt: Bool) -> Bool {
         let optionKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
@@ -181,7 +185,6 @@ final class DocumentContextDetector {
 
     private func isSupportedDocument(_ url: URL) -> Bool {
         guard url.isFileURL else { return false }
-        guard FileManager.default.fileExists(atPath: url.path) else { return false }
 
         let pathExtension = url.pathExtension.lowercased()
         guard !pathExtension.isEmpty else { return false }
