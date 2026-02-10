@@ -8,17 +8,19 @@ final class ProjectWorkspaceWindowController: NSWindowController, NSWindowDelega
     private static let minimumWorkspaceSize = NSSize(width: 1220, height: 760)
 
     let projectID: String
+    private let appViewModel: AppViewModel
     var onWindowClosed: ((String) -> Void)?
     var onWindowFocused: ((String) -> Void)?
 
     init(project: OverlayProject, backendURL: URL?) {
         projectID = project.id
+        appViewModel = AppViewModel(
+            initialProjectRootURL: URL(fileURLWithPath: project.rootPath, isDirectory: true),
+            initialBackendURL: backendURL
+        )
 
         let hostingController = NSHostingController(
-            rootView: RootView(
-                initialProjectRootPath: project.rootPath,
-                initialBackendURL: backendURL
-            )
+            rootView: RootView(viewModel: appViewModel)
             .preferredColorScheme(.light)
         )
         let window = NSWindow(
@@ -49,12 +51,10 @@ final class ProjectWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     init(backendURL: URL?) {
         projectID = "__onboarding__"
+        appViewModel = AppViewModel(initialBackendURL: backendURL)
 
         let hostingController = NSHostingController(
-            rootView: RootView(
-                initialProjectRootPath: nil,
-                initialBackendURL: backendURL
-            )
+            rootView: RootView(viewModel: appViewModel)
             .preferredColorScheme(.light)
         )
         let window = NSWindow(
@@ -103,6 +103,13 @@ final class ProjectWorkspaceWindowController: NSWindowController, NSWindowDelega
         }
         if nextFrame != window.frame {
             window.setFrame(nextFrame, display: true, animate: true)
+        }
+    }
+
+    func activateQuickChat(startNewConversation: Bool) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.appViewModel.startQuickChatSession(startNewConversation: startNewConversation)
         }
     }
 }

@@ -40,6 +40,11 @@ let package = Package(
             name: "StashMacOSCoreTests",
             dependencies: ["StashMacOSCore"],
             path: "Tests/StashMacOSCoreTests"
+        ),
+        .testTarget(
+            name: "StashOverlayTests",
+            dependencies: ["StashOverlay"],
+            path: "Tests/StashOverlayTests"
         )
     ]
 )

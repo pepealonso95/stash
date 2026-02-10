@@ -34,6 +34,11 @@ Codex-style light-mode desktop UI for Stash.
 - `@file` mentions in composer:
   - Type `@` to get file suggestions from current project
   - Mentioned files are attached as structured file context parts for planning
+- Overlay startup mode + global QuickChat hotkeys:
+  - Overlay mode is a user setting (`visible`, `hidden`, `disabled`) and defaults to `hidden`
+  - `Ctrl+Space`: open QuickChat in latest project and start a new conversation
+  - `Ctrl+Shift+Space`: open QuickChat project picker and start a new conversation in selected project
+  - `disabled` still keeps QuickChat hotkeys active
 
 ## Backend integration
 
@@ -98,6 +103,21 @@ open "$HOME/Desktop/Stash Local.app"
 
 This installs a self-contained local app that starts backend + overlay/workspace UI together.
 For full installer details and overrides, see `docs/DESKTOP_INSTALLER.md`.
+
+## Overlay startup mode and hotkeys
+
+Overlay startup behavior is configured as a user setting in the app defaults suite
+`com.stash.overlay.settings` under key `overlayMode`.
+
+Set mode from repo root:
+
+```bash
+./scripts/desktop/set_overlay_mode.sh hidden
+./scripts/desktop/set_overlay_mode.sh visible
+./scripts/desktop/set_overlay_mode.sh disabled
+```
+
+Restart `Stash Local.app` after changing mode.
 
 Reinstall after local code changes:
 

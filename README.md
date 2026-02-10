@@ -150,6 +150,28 @@ cd frontend-macos
 swift test
 ```
 
+## Overlay startup mode + QuickChat hotkeys
+
+Overlay startup mode is a user setting with values:
+- `visible`
+- `hidden` (default)
+- `disabled`
+
+`hidden` and `disabled` both suppress overlay visibility at launch in this iteration.
+QuickChat hotkeys remain active in all modes:
+- `Ctrl+Space`: open QuickChat in latest project and start a new conversation
+- `Ctrl+Shift+Space`: open QuickChat project picker and start a new conversation
+
+Set startup mode from repo root:
+
+```bash
+./scripts/desktop/set_overlay_mode.sh hidden
+./scripts/desktop/set_overlay_mode.sh visible
+./scripts/desktop/set_overlay_mode.sh disabled
+```
+
+Restart `Stash Local.app` after changing startup mode.
+
 ## Troubleshooting
 
 - Backend fails during install with Python version error:

@@ -13,6 +13,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     private var workspaceWindowControllers: [String: ProjectWorkspaceWindowController] = [:]
     private var activeWorkspaceProjectID: String?
     private var onboardingWindowController: ProjectWorkspaceWindowController?
+    private var quickChatPickerWindowController: QuickChatProjectPickerWindowController?
 
     init(viewModel: OverlayViewModel) {
         self.viewModel = viewModel
@@ -67,6 +68,24 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
         window?.orderFrontRegardless()
+    }
+
+    @MainActor
+    func handleLatestQuickChatHotkey() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let project = try await self.viewModel.backendClient.ensureMostRecentlyOpenedProject()
+                self.openWorkspaceWindow(for: project, startQuickChatSession: true)
+            } catch {
+                self.presentQuickChatProjectPickerWindow()
+            }
+        }
+    }
+
+    @MainActor
+    func handlePickerQuickChatHotkey() {
+        presentQuickChatProjectPickerWindow()
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -219,10 +238,12 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @MainActor
-    private func openWorkspaceWindow(for project: OverlayProject) {
+    private func openWorkspaceWindow(for project: OverlayProject, startQuickChatSession: Bool = false) {
         viewModel.selectedProject = project
         onboardingWindowController?.window?.performClose(nil)
         onboardingWindowController = nil
+        quickChatPickerWindowController?.window?.performClose(nil)
+        quickChatPickerWindowController = nil
         closeWorkspaceWindows(exceptProjectID: project.id)
         if let existing = workspaceWindowControllers[project.id] {
             existing.ensureThreePaneWorkspaceFrame()
@@ -232,6 +253,9 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
             activeWorkspaceProjectID = project.id
             Task { @MainActor [weak self] in
                 await self?.syncActiveProjectSelection(projectID: project.id)
+            }
+            if startQuickChatSession {
+                existing.activateQuickChat(startNewConversation: true)
             }
             return
         }
@@ -262,6 +286,9 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        if startQuickChatSession {
+            controller.activateQuickChat(startNewConversation: true)
+        }
     }
 
     @MainActor
@@ -282,6 +309,61 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         controller.ensureThreePaneWorkspaceFrame()
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    private func presentQuickChatProjectPickerWindow() {
+        if let existing = quickChatPickerWindowController, let window = existing.window, window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let pickerViewModel = ProjectPickerViewModel(
+            client: viewModel.backendClient,
+            selectedProjectID: viewModel.selectedProject?.id
+        )
+
+        let initialSize = pickerViewModel.preferredPopoverSize
+        let hostingController = NSHostingController(
+            rootView: ProjectPickerView(viewModel: pickerViewModel)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: initialSize.width, height: initialSize.height),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Stash QuickChat"
+        window.contentViewController = hostingController
+        window.isReleasedWhenClosed = false
+        window.center()
+
+        let controller = QuickChatProjectPickerWindowController(window: window)
+        controller.onWindowClosed = { [weak self] in
+            self?.quickChatPickerWindowController = nil
+        }
+        quickChatPickerWindowController = controller
+
+        pickerViewModel.onPreferredPopoverSizeChange = { [weak window] size in
+            guard let window else { return }
+            var frame = window.frame
+            frame.size = NSSize(width: size.width, height: size.height)
+            window.setFrame(frame, display: true)
+            window.minSize = NSSize(width: size.width, height: size.height)
+        }
+
+        pickerViewModel.onProjectSelected = { [weak self] project in
+            guard let self else { return }
+            self.viewModel.selectedProject = project
+            self.quickChatPickerWindowController?.window?.performClose(nil)
+            self.quickChatPickerWindowController = nil
+            self.openWorkspaceWindow(for: project, startQuickChatSession: true)
+        }
+
+        controller.showWindow(nil)
+        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -478,6 +560,23 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
         let candidatePath = candidate.standardizedFileURL.path
         let ancestorPath = ancestor.standardizedFileURL.path
         return candidatePath == ancestorPath || candidatePath.hasPrefix(ancestorPath + "/")
+    }
+}
+
+final class QuickChatProjectPickerWindowController: NSWindowController, NSWindowDelegate {
+    var onWindowClosed: (() -> Void)?
+
+    override init(window: NSWindow?) {
+        super.init(window: window)
+        window?.delegate = self
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onWindowClosed?()
     }
 }
 

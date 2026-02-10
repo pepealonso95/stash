@@ -4,6 +4,10 @@ import UniformTypeIdentifiers
 public struct RootView: View {
     @StateObject private var viewModel: AppViewModel
 
+    public init(viewModel: AppViewModel) {
+        _viewModel = StateObject(wrappedValue: viewModel)
+    }
+
     public init(initialProjectRootPath: String? = nil, initialBackendURL: URL? = nil) {
         if let initialProjectRootPath {
             _viewModel = StateObject(
@@ -59,7 +63,7 @@ public struct RootView: View {
         }
         .background(CodexTheme.canvas)
         .task {
-            await viewModel.bootstrap()
+            await viewModel.ensureBootstrapped()
         }
         .sheet(isPresented: $viewModel.setupSheetPresented) {
             RuntimeSetupSheet(viewModel: viewModel)

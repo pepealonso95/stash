@@ -3,7 +3,7 @@ import Foundation
 import UniformTypeIdentifiers
 
 @MainActor
-final class AppViewModel: ObservableObject {
+public final class AppViewModel: ObservableObject {
     enum RunInlineState: String, Hashable {
         case idle
         case running
@@ -128,6 +128,7 @@ final class AppViewModel: ObservableObject {
     private var quickActionsIndexMonitorTask: Task<Void, Never>?
     private var lastFileSignature: Int?
     private var lastFileChangeIndexRequestAt = Date.distantPast
+    private var bootstrapTask: Task<Void, Never>?
     private var didBootstrap = false
     private var isPresentingProjectPicker = false
     private let filePollInterval: Duration = .seconds(2)
@@ -295,7 +296,7 @@ final class AppViewModel: ObservableObject {
         !runFeedbackEvents.isEmpty
     }
 
-    init(initialProjectRootURL: URL? = nil, initialBackendURL: URL? = nil) {
+    public init(initialProjectRootURL: URL? = nil, initialBackendURL: URL? = nil) {
         self.initialProjectRootURL = initialProjectRootURL
         if let initialBackendURL {
             client = BackendClient(baseURL: initialBackendURL)
@@ -306,6 +307,7 @@ final class AppViewModel: ObservableObject {
     }
 
     deinit {
+        bootstrapTask?.cancel()
         runPollTask?.cancel()
         runEventStreamTask?.cancel()
         filePollTask?.cancel()
@@ -1323,7 +1325,25 @@ final class AppViewModel: ObservableObject {
         runStatusText = text
     }
 
+    func ensureBootstrapped() async {
+        if let bootstrapTask {
+            await bootstrapTask.value
+            return
+        }
+
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performBootstrap()
+        }
+        bootstrapTask = task
+        await task.value
+    }
+
     func bootstrap() async {
+        await ensureBootstrapped()
+    }
+
+    private func performBootstrap() async {
         guard !didBootstrap else { return }
         didBootstrap = true
 
@@ -2099,6 +2119,25 @@ final class AppViewModel: ObservableObject {
             errorText = "Could not delete chat: \(error.localizedDescription)"
             await refreshConversations()
         }
+    }
+
+    public func startQuickChatSession(startNewConversation: Bool) async {
+        await ensureBootstrapped()
+
+        guard project != nil else {
+            if errorText == nil {
+                errorText = "No project selected. Pick a folder to start using Stash."
+            }
+            return
+        }
+
+        if startNewConversation {
+            await createConversation()
+        } else if selectedConversationID == nil {
+            await refreshConversations()
+        }
+
+        composerFocusToken &+= 1
     }
 
     func selectConversation(id: String) async {
