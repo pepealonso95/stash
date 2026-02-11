@@ -1,6 +1,9 @@
 # Stash
 
-Stash is a local-first macOS coding assistant with:
+Stash is **Codex Cowork**: a local-first AI coworker for safely doing work inside a chosen folder.
+It is built for coding and non-coding workflows, so users can let AI handle tasks while keeping work scoped to the project directory.
+
+Stash includes:
 
 - A local backend service (`backend-service/`)
 - A workspace app (`StashMacOSApp`)
