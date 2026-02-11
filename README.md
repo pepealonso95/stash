@@ -3,166 +3,69 @@
 Stash is a local-first macOS coding assistant with:
 
 - A local backend service (`backend-service/`)
-- A main workspace app (`StashMacOSApp`)
+- A workspace app (`StashMacOSApp`)
 - A floating overlay app (`StashOverlay`)
 
-The backend is the source of truth for project/session state, and both frontend surfaces sync through it.
+## Canonical Repository
 
-## What Is Implemented
+This repository is now fully independent. The canonical remote is:
 
-- Per-project local state in `PROJECT_ROOT/.stash/`
-- SQLite-backed conversations/messages/runs/steps/events
-- Local indexing + retrieval with watcher-driven incremental updates
-- Run orchestration with planning/execution/confirmation phases
-- Apply/discard flow for proposed filesystem changes
-- Empty-chat quick actions (exactly 3)
-- Active project sync across workspace + overlay via backend runtime config
-- Chat deletion (conversation + related messages/runs/steps/events cleanup)
+- `https://github.com/pepealonso95/stash`
 
-## Repository Layout
+No upstream auto-sync workflow is used.
 
-- `backend-service/`: FastAPI backend + tests
-- `frontend-macos/`: Swift package with workspace and overlay executables
-- `scripts/`: install/run/test helpers
-- `docs/`: integration and installer docs
+## Install (Fresh macOS Machine, Recommended)
 
-## Prerequisites
+Requirements:
 
 - macOS 14+
-- Xcode Command Line Tools (`xcode-select --install`)
-- `swift` in `PATH`
-- `python3` in `PATH` and version `>=3.11`
+- `python3` in `PATH`, version `>=3.11`
 
-Important: `backend-service/pyproject.toml` requires Python `>=3.11`.  
-`scripts/install_stack.sh` uses `python3`, so your default `python3` must point to 3.11+.
-
-## Quick Start
-
-### 1) Install backend environment
-
-From repo root:
+One-step install from latest GitHub Release:
 
 ```bash
-./scripts/install_stack.sh
+curl -fsSL https://raw.githubusercontent.com/pepealonso95/stash/main/scripts/bootstrap/install_stash_local.sh | bash
 ```
 
-If default `python3` is below 3.11:
+Install a specific version:
 
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -e backend-service
-pip install "uv>=0.4.30" "pypdf>=4.2.0"
+curl -fsSL https://raw.githubusercontent.com/pepealonso95/stash/main/scripts/bootstrap/install_stash_local.sh | bash -s -- --version v0.3.0
 ```
 
-### 2) Start backend
+The installer downloads release assets, verifies checksums, installs `Stash Local.app` to `/Applications` (or `~/Applications` fallback), and provisions backend runtime at:
 
-```bash
-./scripts/run_backend.sh
+```text
+~/Library/Application Support/StashLocal/runtime/.venv
 ```
 
-Backend URL: `http://127.0.0.1:8765`
+See `docs/DESKTOP_INSTALLER.md` for full options and troubleshooting.
 
-### 3) Start frontend app(s)
+## Developer Install (Build From Source)
 
-Workspace app:
-
-```bash
-cd frontend-macos
-swift run StashMacOSApp
-```
-
-Overlay app:
-
-```bash
-cd frontend-macos
-swift run StashOverlay
-```
-
-If you want both workspace + overlay running at once, start them in separate terminals (with backend already running).
-
-## One-Command Launchers
-
-From repo root:
-
-```bash
-./scripts/run_stack.sh
-./scripts/run_everything.sh
-```
-
-- `run_stack.sh` starts backend and launches one frontend product.
-- Default frontend product is `StashMacOSApp`.
-- To launch overlay instead:
-
-```bash
-STASH_FRONTEND_PRODUCT=StashOverlay ./scripts/run_stack.sh
-```
-
-- `run_everything.sh` wraps install+run behavior:
-  - `--install`: force install first
-  - `--skip-install`: skip install
-
-## Desktop App Bundle
-
-Install:
+Use this only when developing locally:
 
 ```bash
 ./scripts/desktop/install_desktop_app.sh
-open "$HOME/Desktop/Stash Local.app"
 ```
 
-Runtime logs:
+This path requires local Swift toolchain/Xcode Command Line Tools and builds binaries from source.
 
-```bash
-tail -f "$HOME/Library/Logs/StashLocal/backend.log"
-tail -f "$HOME/Library/Logs/StashLocal/frontend.log"
-tail -f "$HOME/Library/Logs/StashLocal/overlay.log"
-```
+## Overlay Startup Mode + QuickChat Hotkeys
 
-See `docs/DESKTOP_INSTALLER.md` for overrides and packaging details.
+Overlay startup mode values:
 
-## Testing
-
-Backend unit tests:
-
-```bash
-source .venv/bin/activate
-PYTHONPATH=backend-service pytest -q backend-service/tests
-```
-
-Backend smoke test:
-
-```bash
-./scripts/smoke_test_backend.sh
-```
-
-Backend Codex CLI integration test (mocked codex binary):
-
-```bash
-./scripts/integration_test_codex_cli_mock.sh
-```
-
-Frontend tests:
-
-```bash
-cd frontend-macos
-swift test
-```
-
-## Overlay startup mode + QuickChat hotkeys
-
-Overlay startup mode is a user setting with values:
 - `visible`
 - `hidden` (default)
 - `disabled`
 
 `hidden` and `disabled` both suppress overlay visibility at launch in this iteration.
 QuickChat hotkeys remain active in all modes:
+
 - `Ctrl+Space`: open QuickChat in latest project and start a new conversation
 - `Ctrl+Shift+Space`: open QuickChat project picker and start a new conversation
 
-Set startup mode from repo root:
+Set mode from repo root:
 
 ```bash
 ./scripts/desktop/set_overlay_mode.sh hidden
@@ -170,15 +73,61 @@ Set startup mode from repo root:
 ./scripts/desktop/set_overlay_mode.sh disabled
 ```
 
-Restart `Stash Local.app` after changing startup mode.
+Restart `Stash Local.app` after changing mode.
+
+## Maintainer Remote Guardrails
+
+Before pushing, verify `origin` points to your fork and not the old upstream:
+
+```bash
+git remote -v
+git remote get-url origin
+```
+
+If this clone still has `fork` as your GitHub repo and `origin` as old upstream, normalize it:
+
+```bash
+git remote rename origin upstream-old
+git remote rename fork origin
+git remote remove upstream-old
+```
+
+Guardrail: never push to the old upstream. Push and release from `pepealonso95/stash` only.
+
+## Release Process (Maintainers)
+
+1. Land changes on `main`.
+2. Create and push a tag (example):
+
+```bash
+git tag v0.3.0
+git push origin v0.3.0
+```
+
+3. GitHub Actions workflow `.github/workflows/release-macos.yml` builds and publishes:
+   - `stash-local-macos-universal-<version>.tar.gz`
+   - `stash-backend-<version>-py3-none-any.whl`
+   - `stash-local-checksums-<version>.txt`
+   - `release-manifest-<version>.json`
+4. Validate install on clean Apple Silicon + Intel machines.
+
+Rollback policy:
+
+- Do not replace existing tag assets in place.
+- Publish a new patch tag (for example `v0.3.1`) with fixes.
 
 ## Troubleshooting
 
-- Backend fails during install with Python version error:
-  - Verify `python3 --version` is 3.11+ or create `.venv` manually with `python3.11`.
-- Overlay is not visible:
-  - `run_stack.sh` launches `StashMacOSApp` by default, not overlay.
-  - Run `swift run StashOverlay` directly, or use `STASH_FRONTEND_PRODUCT=StashOverlay`.
+- Unsigned app blocked by Gatekeeper:
+  - Right-click `Stash Local.app` and choose `Open`, or run:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Stash Local.app"
+```
+
+- Installer fails with Python requirement:
+  - Verify `python3 --version` is `3.11+`.
+
 - Runs do not execute through Codex:
   - Verify CLI auth: `codex login status`.
 
@@ -188,16 +137,13 @@ Restart `Stash Local.app` after changing startup mode.
 - `frontend-macos/README.md`
 - `docs/FRONTEND_BACKEND_RUN.md`
 - `docs/DESKTOP_INSTALLER.md`
+- `docs/release-manifest.schema.json`
 
 ## License
 Copyright 2026 Kamal Kamalaldin, Mert Gulsan, Pepe Alonso
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
-THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-
-TBD
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

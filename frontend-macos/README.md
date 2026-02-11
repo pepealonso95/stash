@@ -82,27 +82,21 @@ One-command backend + frontend launcher from repo root:
 ./scripts/run_stack.sh
 ```
 
-## Install As Desktop App (macOS, from scratch)
+## Install As Desktop App (macOS)
 
-Prerequisites:
-- macOS 14+
-- Xcode Command Line Tools (`xcode-select --install`)
-- `python3` and `swift` in `PATH`
+End-user install (recommended, no local Swift build):
 
-From repo root:
+```bash
+curl -fsSL https://raw.githubusercontent.com/pepealonso95/stash/main/scripts/bootstrap/install_stash_local.sh | bash
+```
+
+Developer install from this repo (build from source):
 
 ```bash
 ./scripts/desktop/install_desktop_app.sh
 ```
 
-Then launch:
-
-```bash
-open "$HOME/Desktop/Stash Local.app"
-```
-
-This installs a self-contained local app that starts backend + overlay/workspace UI together.
-For full installer details and overrides, see `docs/DESKTOP_INSTALLER.md`.
+For installer contracts, overrides, and troubleshooting, see `docs/DESKTOP_INSTALLER.md`.
 
 ## Overlay startup mode and hotkeys
 

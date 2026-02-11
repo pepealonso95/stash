@@ -1,0 +1,359 @@
+name: release-macos
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version or tag (e.g. 0.3.0 or v0.3.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-release-artifacts:
+    runs-on: macos-14
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${{ inputs.version }}"
+          fi
+
+          if [[ "$TAG" != v* ]]; then
+            TAG="v$TAG"
+          fi
+          VERSION="${TAG#v}"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Using tag=$TAG version=$VERSION"
+
+      - name: Install Python build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Build backend wheel for release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+
+          rm -rf "$RUNNER_TEMP/backend-service-release" "$RUNNER_TEMP/release"
+          cp -R backend-service "$RUNNER_TEMP/backend-service-release"
+          mkdir -p "$RUNNER_TEMP/release"
+
+          python - "$VERSION" "$RUNNER_TEMP/backend-service-release/pyproject.toml" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          path = Path(sys.argv[2])
+          text = path.read_text(encoding="utf-8")
+          updated = re.sub(r'(?m)^version\s*=\s*"[^"]+"\s*$', f'version = "{version}"', text, count=1)
+          if updated == text:
+              raise SystemExit("Could not update backend version in pyproject.toml")
+          path.write_text(updated, encoding="utf-8")
+          PY
+
+          python -m build --wheel "$RUNNER_TEMP/backend-service-release" --outdir "$RUNNER_TEMP/release"
+
+          WHEEL_SOURCE="$(find "$RUNNER_TEMP/release" -maxdepth 1 -type f -name "stash_backend-${VERSION}-py3-none-any.whl" | head -n 1 || true)"
+          if [[ -z "$WHEEL_SOURCE" ]]; then
+            echo "Could not find built wheel for version $VERSION" >&2
+            ls -la "$RUNNER_TEMP/release"
+            exit 1
+          fi
+
+          cp "$WHEEL_SOURCE" "$RUNNER_TEMP/release/stash-backend-${VERSION}-py3-none-any.whl"
+
+      - name: Build universal frontend binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release/bin"
+
+          cd frontend-macos
+
+          swift build -c release --arch arm64 --product StashMacOSApp
+          swift build -c release --arch arm64 --product StashOverlay
+
+          swift build -c release --arch x86_64 --product StashMacOSApp
+          swift build -c release --arch x86_64 --product StashOverlay
+
+          ARM_DIR=".build/arm64-apple-macosx/release"
+          X64_DIR=".build/x86_64-apple-macosx/release"
+
+          lipo -create "$ARM_DIR/StashMacOSApp" "$X64_DIR/StashMacOSApp" -output "$RUNNER_TEMP/release/bin/StashMacOSApp"
+          lipo -create "$ARM_DIR/StashOverlay" "$X64_DIR/StashOverlay" -output "$RUNNER_TEMP/release/bin/StashOverlay"
+
+          chmod +x "$RUNNER_TEMP/release/bin/StashMacOSApp" "$RUNNER_TEMP/release/bin/StashOverlay"
+
+      - name: Build app icon
+        run: |
+          STASH_ICON_SOURCE="$GITHUB_WORKSPACE/frontend-macos/Resources/AppIcon-source.png" \
+          STASH_ICNS_OUT="$RUNNER_TEMP/release/AppIcon.icns" \
+          "$GITHUB_WORKSPACE/scripts/desktop/build_icns.sh"
+
+      - name: Assemble app bundle and release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.version.outputs.version }}"
+          APP_ASSET="stash-local-macos-universal-${VERSION}.tar.gz"
+          WHEEL_ASSET="stash-backend-${VERSION}-py3-none-any.whl"
+          CHECKSUMS_ASSET="stash-local-checksums-${VERSION}.txt"
+          MANIFEST_ASSET="release-manifest-${VERSION}.json"
+
+          STASH_BACKEND_URL="http://127.0.0.1:8765" \
+          STASH_CODEX_MODE="cli" \
+          "$GITHUB_WORKSPACE/scripts/desktop/assemble_app_bundle.sh" \
+            --frontend-bin "$RUNNER_TEMP/release/bin/StashMacOSApp" \
+            --overlay-bin "$RUNNER_TEMP/release/bin/StashOverlay" \
+            --out-app "$RUNNER_TEMP/release/Stash Local.app" \
+            --version "$VERSION" \
+            --icon-icns "$RUNNER_TEMP/release/AppIcon.icns"
+
+          tar -czf "$RUNNER_TEMP/release/$APP_ASSET" -C "$RUNNER_TEMP/release" "Stash Local.app"
+
+          cat > "$RUNNER_TEMP/release/$MANIFEST_ASSET" <<JSON
+          {
+            "version": "$VERSION",
+            "app_asset": "$APP_ASSET",
+            "backend_wheel_asset": "$WHEEL_ASSET",
+            "checksums_asset": "$CHECKSUMS_ASSET",
+            "minimum_macos": "14.0",
+            "minimum_python": "3.11"
+          }
+          JSON
+
+          (
+            cd "$RUNNER_TEMP/release"
+            shasum -a 256 "$APP_ASSET" "$WHEEL_ASSET" "$MANIFEST_ASSET" > "$CHECKSUMS_ASSET"
+          )
+
+      - name: Validate launcher portability
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_ROOT="$RUNNER_TEMP/release/Stash Local.app"
+          LAUNCHER="$APP_ROOT/Contents/MacOS/StashDesktopLauncher"
+          CONF="$APP_ROOT/Contents/Resources/launcher.conf"
+
+          [[ -f "$LAUNCHER" ]] || { echo "Missing launcher script"; exit 1; }
+          [[ -f "$CONF" ]] || { echo "Missing launcher config"; exit 1; }
+
+          if grep -F "$GITHUB_WORKSPACE" "$LAUNCHER" "$CONF" >/dev/null 2>&1; then
+            echo "Found build-machine workspace path in launcher assets" >&2
+            exit 1
+          fi
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: |
+            ${{ runner.temp }}/release/stash-local-macos-universal-${{ steps.version.outputs.version }}.tar.gz
+            ${{ runner.temp }}/release/stash-backend-${{ steps.version.outputs.version }}-py3-none-any.whl
+            ${{ runner.temp }}/release/stash-local-checksums-${{ steps.version.outputs.version }}.txt
+            ${{ runner.temp }}/release/release-manifest-${{ steps.version.outputs.version }}.json
+          if-no-files-found: error
+
+  validate-release-artifacts:
+    runs-on: macos-14
+    needs: build-release-artifacts
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate manifest and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ needs.build-release-artifacts.outputs.version }}"
+          APP_ASSET="stash-local-macos-universal-${VERSION}.tar.gz"
+          WHEEL_ASSET="stash-backend-${VERSION}-py3-none-any.whl"
+          CHECKSUMS_ASSET="stash-local-checksums-${VERSION}.txt"
+          MANIFEST_ASSET="release-manifest-${VERSION}.json"
+
+          cd "$RUNNER_TEMP/dist"
+
+          for file in "$APP_ASSET" "$WHEEL_ASSET" "$CHECKSUMS_ASSET" "$MANIFEST_ASSET"; do
+            [[ -f "$file" ]] || { echo "Missing $file"; exit 1; }
+          done
+
+          python - "$MANIFEST_ASSET" "$VERSION" "$APP_ASSET" "$WHEEL_ASSET" "$CHECKSUMS_ASSET" <<'PY'
+          import json
+          import sys
+
+          manifest, version, app_asset, wheel_asset, checksums_asset = sys.argv[1:]
+          with open(manifest, "r", encoding="utf-8") as fh:
+              payload = json.load(fh)
+
+          required = [
+              "version",
+              "app_asset",
+              "backend_wheel_asset",
+              "checksums_asset",
+              "minimum_macos",
+              "minimum_python",
+          ]
+          missing = [k for k in required if k not in payload]
+          if missing:
+              raise SystemExit(f"Manifest missing keys: {missing}")
+
+          assert payload["version"] == version
+          assert payload["app_asset"] == app_asset
+          assert payload["backend_wheel_asset"] == wheel_asset
+          assert payload["checksums_asset"] == checksums_asset
+          assert payload["minimum_macos"] == "14.0"
+          assert payload["minimum_python"] == "3.11"
+          PY
+
+          shasum -a 256 -c "$CHECKSUMS_ASSET"
+
+      - name: Validate universal binaries and startup sanity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ needs.build-release-artifacts.outputs.version }}"
+          APP_ASSET="stash-local-macos-universal-${VERSION}.tar.gz"
+
+          cd "$RUNNER_TEMP/dist"
+          tar -xzf "$APP_ASSET"
+
+          APP_BIN="Stash Local.app/Contents/Resources/StashMacOSApp"
+          OVERLAY_BIN="Stash Local.app/Contents/Resources/StashOverlay"
+
+          [[ -x "$APP_BIN" ]] || { echo "Missing app binary"; exit 1; }
+          [[ -x "$OVERLAY_BIN" ]] || { echo "Missing overlay binary"; exit 1; }
+
+          lipo -archs "$APP_BIN" | grep -q 'arm64' || { echo "App binary missing arm64"; exit 1; }
+          lipo -archs "$APP_BIN" | grep -q 'x86_64' || { echo "App binary missing x86_64"; exit 1; }
+          lipo -archs "$OVERLAY_BIN" | grep -q 'arm64' || { echo "Overlay binary missing arm64"; exit 1; }
+          lipo -archs "$OVERLAY_BIN" | grep -q 'x86_64' || { echo "Overlay binary missing x86_64"; exit 1; }
+
+          python - "$APP_BIN" "$OVERLAY_BIN" <<'PY'
+          import subprocess
+          import sys
+
+          for binary in sys.argv[1:]:
+              try:
+                  proc = subprocess.run([binary, "--help"], timeout=5, check=False, capture_output=True, text=True)
+                  if proc.returncode not in (0, 1):
+                      print(f"Unexpected return code for {binary}: {proc.returncode}", file=sys.stderr)
+                      sys.exit(1)
+              except subprocess.TimeoutExpired:
+                  # GUI binaries may not exit quickly; timeout is accepted as startup sanity.
+                  pass
+          PY
+
+      - name: Validate backend wheel install and health
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ needs.build-release-artifacts.outputs.version }}"
+          WHEEL_ASSET="stash-backend-${VERSION}-py3-none-any.whl"
+
+          cd "$RUNNER_TEMP/dist"
+          python -m venv "$RUNNER_TEMP/venv"
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/venv/bin/activate"
+
+          python -m pip install --upgrade pip
+          python -m pip install "$WHEEL_ASSET"
+
+          python - <<'PY'
+          import os
+          import subprocess
+          import time
+          import urllib.request
+
+          proc = subprocess.Popen(
+              ["uvicorn", "stash_backend.main:app", "--host", "127.0.0.1", "--port", "8876"],
+              stdout=subprocess.DEVNULL,
+              stderr=subprocess.DEVNULL,
+          )
+          try:
+              deadline = time.time() + 25
+              ok = False
+              while time.time() < deadline:
+                  try:
+                      with urllib.request.urlopen("http://127.0.0.1:8876/health", timeout=2) as resp:
+                          if resp.status == 200:
+                              ok = True
+                              break
+                  except Exception:
+                      time.sleep(0.4)
+              if not ok:
+                  raise SystemExit("Backend /health check did not become ready")
+          finally:
+              proc.terminate()
+              try:
+                  proc.wait(timeout=10)
+              except subprocess.TimeoutExpired:
+                  proc.kill()
+          PY
+
+  publish-release:
+    runs-on: macos-14
+    needs: [build-release-artifacts, validate-release-artifacts]
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build-release-artifacts.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/stash-local-macos-universal-${{ needs.build-release-artifacts.outputs.version }}.tar.gz
+            dist/stash-backend-${{ needs.build-release-artifacts.outputs.version }}-py3-none-any.whl
+            dist/stash-local-checksums-${{ needs.build-release-artifacts.outputs.version }}.txt
+            dist/release-manifest-${{ needs.build-release-artifacts.outputs.version }}.json
